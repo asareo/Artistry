@@ -3,14 +3,13 @@
 *.swp
 *.swo
 
-# Xcode
-xcuserdata/
+# Xcode / Build
+userdata/
 *.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
 DerivedData/
 build/
-
-# Build artifacts
-ArtifyV2.app/Contents/MacOS/ArtifyV2
+*.app/
+*.zip
 
 # Docker
 artify-core/tmp/
@@ -24,5 +23,6 @@ __pycache__/
 *.pyc
 .env
 
-# Caches
+# Project specific
+/tmp/ArtifyV2_*
 *.log

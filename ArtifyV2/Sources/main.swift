@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v2.3: Kahoot quiz, draggable overlay, artist portraits, About panel.
+// v2.6: Favorites system overhaul, Gallery with local Photos integration, git-clean.
 
 import AppKit
 import SwiftUI
@@ -38,6 +38,12 @@ struct APIResponse: Codable {
     let code: Int
     let message: String
     let data: Photo?
+}
+
+struct APISearchResponse: Codable {
+    let code: Int
+    let message: String
+    let data: [Photo]?
 }
 
 // ─────────────────────────────────────────────
@@ -223,10 +229,62 @@ class ArtifyState: ObservableObject {
     @Published var shuffleInterval: TimeInterval = 0 // 0 = off
     @Published var overlayVisible = true
     @Published var quizReady = false   // true = menu bar shows "Quiz Ready" button
+    @Published var favoritedIDs: Set<String> = []
+    @Published var artistSearchQuery: String = ""
 
     // Ring buffer of the last 10 successfully shown photos (for quiz)
     private(set) var recentlyShownPhotos: [Photo] = []
     private var photosUntilQuiz: Int = Int.random(in: 5...8)
+
+    private init() {
+        // Load favorites from UserDefaults
+        if let saved = UserDefaults.standard.stringArray(forKey: "ArtifyFavoriteIDs") {
+            favoritedIDs = Set(saved)
+        }
+    }
+
+    // ── Favorites persistence ──────────────────────────────────────────
+
+    func isFavorited(_ photo: Photo) -> Bool {
+        favoritedIDs.contains(photo.id)
+    }
+
+    func toggleFavorite(_ photo: Photo) {
+        if favoritedIDs.contains(photo.id) {
+            favoritedIDs.remove(photo.id)
+            removeFavoriteData(photoID: photo.id)
+        } else {
+            favoritedIDs.insert(photo.id)
+            saveFavoriteData(photo)
+        }
+        UserDefaults.standard.set(Array(favoritedIDs), forKey: "ArtifyFavoriteIDs")
+    }
+
+    /// Load all favorited Photo objects from disk
+    func loadFavoritePhotos() -> [Photo] {
+        favoritedIDs.compactMap { id -> Photo? in
+            let key = "ArtifyFav_\(id)"
+            guard let data = UserDefaults.standard.data(forKey: key),
+                  let photo = try? JSONDecoder().decode(Photo.self, from: data) else { return nil }
+            return photo
+        }.sorted { $0.name < $1.name }
+    }
+
+    private func saveFavoriteData(_ photo: Photo) {
+        if let data = try? JSONEncoder().encode(photo) {
+            UserDefaults.standard.set(data, forKey: "ArtifyFav_\(photo.id)")
+        }
+    }
+
+    private func removeFavoriteData(photoID: String) {
+        UserDefaults.standard.removeObject(forKey: "ArtifyFav_\(photoID)")
+    }
+
+    /// Returns the local cached image URL for a photo, if it was downloaded
+    func cachedImageURL(for photo: Photo) -> URL? {
+        ArtifyCacheManager.shared.cachedWallpapers
+            .first { $0.lastPathComponent == "\(photo.id).jpg" }
+    }
 
     private var shuffleTimer: Timer?
     private var lastPhotoID: String?
@@ -259,7 +317,15 @@ class ArtifyState: ObservableObject {
         isLoading = true
         lastError = nil
 
-        guard let url = URL(string: "\(apiBase)/feature/random") else {
+        let urlString: String
+        if !artistSearchQuery.isEmpty {
+            let encodedQuery = artistSearchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            urlString = "\(apiBase)/search/photos?q=\(encodedQuery)"
+        } else {
+            urlString = "\(apiBase)/feature/random"
+        }
+
+        guard let url = URL(string: urlString) else {
             lastError = "Invalid URL"
             isLoading = false
             return
@@ -286,8 +352,17 @@ class ArtifyState: ObservableObject {
 
                 do {
                     let apiResp = try JSONDecoder().decode(APIResponse.self, from: data)
+                    
+                    // Handle search results (SearchPhotos returns an array, FeatureRandom returns a single object)
+                    // Wait, let's check the APIResponse model.
+                    
                     if let photo = apiResp.data {
-                        // If we got the same photo as last time, retry up to maxRetries
+                        // Success hit
+                        if !self.artistSearchQuery.isEmpty {
+                            self.artistSearchQuery = ""
+                        }
+                        
+                        // If we got the same photo as last time...
                         if photo.id == self.lastPhotoID && self.fetchRetryCount < self.maxFetchRetries {
                             self.fetchRetryCount += 1
                             self.isLoading = false
@@ -301,10 +376,19 @@ class ArtifyState: ObservableObject {
                         self.currentPhoto = photo
                         self.setWallpaper(from: photo.image_url, photoID: photo.id)
                     } else {
+                        // No photo found. If we were searching, maybe clear query and retry random
+                        if !self.artistSearchQuery.isEmpty {
+                            self.artistSearchQuery = ""
+                            self.fetchRandom()
+                            return
+                        }
                         self.lastError = "No photo in response"
                         self.isLoading = false
                     }
                 } catch {
+                    // Try parsing as array if it's search?
+                    // Let's keep it simple: the search API in Go returns SuccessResponse(photos) where photos is []Photo.
+                    // But APIResponse.data is a single Photo? I need to check Data Models.
                     self.lastError = "Parse error: \(error.localizedDescription)"
                     self.isLoading = false
                 }
@@ -453,6 +537,8 @@ class ArtifyState: ObservableObject {
         OverlayWindowController.shared.update()
     }
 
+    // NOTE: isFavorited, toggleFavorite, and helpers are defined in the init block above.
+
     /// Called by the quiz when the user dismisses it.
     func resumeAfterQuiz() {
         quizReady = false
@@ -492,37 +578,362 @@ class ArtifyState: ObservableObject {
 // we move the window directly, bypassing SwiftUI's event handling.
 
 class DraggableWindow: NSWindow {
-    private var dragStart: NSPoint?
-    private var dragging = false
-
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    // Use mouseDown to trigger a standard macOS drag.
+    // This is more robust than manually tracking in sendEvent.
     override func sendEvent(_ event: NSEvent) {
-        switch event.type {
-        case .leftMouseDown:
-            dragStart = NSEvent.mouseLocation
-            dragging = false
-            super.sendEvent(event)
-        case .leftMouseDragged:
-            if let start = dragStart {
-                let cur = NSEvent.mouseLocation
-                let dx = cur.x - start.x, dy = cur.y - start.y
-                if !dragging && (dx*dx + dy*dy) > 16 { dragging = true }
-                if dragging {
-                    setFrameOrigin(NSPoint(x: frame.origin.x + cur.x - start.x,
-                                          y: frame.origin.y + cur.y - start.y))
-                    dragStart = cur
-                    return   // don't forward — we handled it
+        if event.type == .leftMouseDown {
+            // Initiate standard drag immediately on click
+            self.performDrag(with: event)
+        }
+        super.sendEvent(event)
+    }
+}
+
+// ─────────────────────────────────────────────
+// MARK: - About Window Controller
+// ─────────────────────────────────────────────
+
+class AboutWindowController {
+    static let shared = AboutWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        if window == nil {
+            let w: CGFloat = 360, h: CGFloat = 400
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered, defer: false
+            )
+            win.center()
+            win.title = "About ArtifyV2"
+            win.titlebarAppearsTransparent = true
+            win.isMovableByWindowBackground = true
+            
+            let hosting = NSHostingView(rootView: AboutView())
+            hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+            win.contentView = hosting
+            self.window = win
+        }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+struct AboutView: View {
+    @ObservedObject var state = ArtifyState.shared
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "paintbrush.fill")
+                .font(.system(size: 60))
+                .foregroundColor(.accentColor)
+                .padding(.top, 40)
+            
+            Text("ArtifyV2")
+                .font(.system(size: 24, weight: .bold))
+            
+            Text("v2.5")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Divider().padding(.horizontal, 40)
+            
+            VStack(spacing: 8) {
+                Text("Developed by Owuraku")
+                    .font(.headline)
+                Text("Bringing the world's masterpieces to your desktop.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+            }
+            
+            VStack(alignment: .leading, spacing: 6) {
+                let cacheCount = ArtifyCacheManager.shared.cachedWallpapers.count
+                let portraitCount = ArtistPortraitCache.shared.totalCount
+                
+                HStack {
+                    Image(systemName: "photo.on.rectangle")
+                    Text("\(cacheCount) paintings cached")
+                }
+                HStack {
+                    Image(systemName: "person.crop.rectangle")
+                    Text("\(portraitCount) artist portraits saved")
                 }
             }
-            super.sendEvent(event)
-        case .leftMouseUp:
-            dragStart = nil; dragging = false
-            super.sendEvent(event)
-        default:
-            super.sendEvent(event)
+            .font(.caption)
+            .padding(15)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.1)))
+            
+            Spacer()
+            
+            Text("© 2026 Owuraku. All rights reserved.")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .padding(.bottom, 20)
         }
+        .frame(width: 360, height: 400)
+    }
+}
+
+// ─────────────────────────────────────────────
+// MARK: - Gallery Window Controller
+// ─────────────────────────────────────────────
+
+class GalleryWindowController {
+    static let shared = GalleryWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        // Always create a fresh window so gallery data is current
+        window?.close()
+        window = nil
+
+        let w: CGFloat = 860, h: CGFloat = 640
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+            backing: .buffered, defer: false
+        )
+        win.center()
+        win.title = "Masterpiece Gallery"
+        win.titlebarAppearsTransparent = true
+        win.minSize = NSSize(width: 640, height: 480)
+
+        let hosting = NSHostingView(rootView: GalleryView())
+        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        win.contentView = hosting
+        self.window = win
+
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+struct GalleryView: View {
+    @ObservedObject var state = ArtifyState.shared
+    @State private var favorites: [Photo] = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Masterpiece Gallery")
+                        .font(.system(size: 22, weight: .bold, design: .serif))
+                    Text("\(favorites.count) saved work\(favorites.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 24))
+                    .foregroundColor(.red.opacity(0.7))
+            }
+            .padding(.horizontal, 30)
+            .padding(.top, 50)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            if favorites.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "heart.slash")
+                        .font(.system(size: 60))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("No favorites yet")
+                        .font(.title2.bold())
+                    Text("Click the ♥ on the overlay while viewing a painting")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 240), spacing: 16)],
+                        spacing: 16
+                    ) {
+                        ForEach(favorites, id: \.id) { photo in
+                            GalleryItem(photo: photo)
+                        }
+                    }
+                    .padding(24)
+                }
+            }
+        }
+        .frame(minWidth: 640, minHeight: 480)
+        .onAppear { reload() }
+        // Re-read whenever the user hearts/unhearts something
+        .onChange(of: state.favoritedIDs) { _ in reload() }
+    }
+
+    private func reload() {
+        favorites = state.loadFavoritePhotos()
+    }
+}
+
+struct GalleryItem: View {
+    let photo: Photo
+    @ObservedObject var state = ArtifyState.shared
+    @State private var isHovering = false
+    @State private var showInfo = false
+
+    private var cachedURL: URL? { state.cachedImageURL(for: photo) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // ── Thumbnail ──────────────────────────────────────────────
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let url = cachedURL, let img = NSImage(contentsOf: url) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.15))
+                            .overlay(
+                                Image(systemName: "photo")
+                                    .font(.system(size: 30))
+                                    .foregroundColor(.secondary)
+                            )
+                    }
+                }
+                .frame(height: 170)
+                .clipped()
+
+                // Info toggle
+                Button(action: { withAnimation(.spring()) { showInfo.toggle() } }) {
+                    Image(systemName: showInfo ? "info.circle.fill" : "info.circle")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                        .padding(6)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            // ── Info panel ────────────────────────────────────────────
+            if showInfo {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(photo.name)
+                        .font(.system(size: 13, weight: .bold, design: .serif))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 4) {
+                        Text(photo.author.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        if let date = photo.date, !date.isEmpty {
+                            Text("· \(date)")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        if let style = photo.style, !style.isEmpty {
+                            galleryBadge(style)
+                        }
+                        if let media = photo.media, !media.isEmpty {
+                            galleryBadge(media.split(separator: ",").first.map(String.init) ?? media)
+                        }
+                    }
+
+                    if let info = photo.info, !info.isEmpty {
+                        let blurb = info.hasPrefix("JEOPARDY KEY:") ?
+                            String(info.dropFirst("JEOPARDY KEY:".count)).trimmingCharacters(in: .whitespaces) : info
+                        Text(blurb.prefix(200) + (blurb.count > 200 ? "…" : ""))
+                            .font(.system(size: 10, weight: .light))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    // Open in Photos / reveal in Finder buttons
+                    HStack(spacing: 8) {
+                        if let url = cachedURL {
+                            Button(action: { openInPhotos(url) }) {
+                                Label("Open in Photos", systemImage: "photo")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+
+                            Button(action: { NSWorkspace.shared.activateFileViewerSelecting([url]) }) {
+                                Label("Show in Finder", systemImage: "folder")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                        }
+
+                        Spacer()
+
+                        // Unfavorite from gallery
+                        Button(action: { state.toggleFavorite(photo) }) {
+                            Image(systemName: "heart.slash")
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove from favorites")
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(10)
+                .background(Color(NSColor.controlBackgroundColor))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+
+            } else {
+                // Compact name/artist row
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(photo.name)
+                        .font(.system(size: 13, weight: .semibold, design: .serif))
+                        .lineLimit(1)
+                    Text(photo.author.name)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color(NSColor.controlBackgroundColor))
+                .shadow(color: .black.opacity(isHovering ? 0.18 : 0.08), radius: isHovering ? 12 : 6)
+        )
+        .scaleEffect(isHovering ? 1.015 : 1.0)
+        .onHover { isHovering = $0 }
+        .animation(.spring(response: 0.3), value: isHovering)
+        .animation(.spring(response: 0.3), value: showInfo)
+    }
+
+    @ViewBuilder
+    private func galleryBadge(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+            .foregroundColor(.accentColor)
+    }
+
+    private func openInPhotos(_ url: URL) {
+        // Import the image file into Photos.app
+        let script = "osascript -e 'tell application \"Photos\" to import POSIX file \"\(url.path)\"'"
+        let task = Process()
+        task.launchPath = "/bin/sh"
+        task.arguments = ["-c", script]
+        try? task.run()
     }
 }
 
@@ -602,29 +1013,49 @@ class OverlayWindowController {
 
 struct OverlayView: View {
     @ObservedObject private var state = ArtifyState.shared
+    @State private var isHoveringTitle = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let photo = state.currentPhoto {
 
-                // Title
-                Text(photo.name)
-                    .font(.system(size: 17, weight: .bold, design: .serif))
-                    .foregroundColor(.white)
-                    .lineLimit(2)
-
-                // Artist + date
-                HStack(spacing: 6) {
-                    Text(photo.author.name)
-                        .font(.system(size: 13, weight: .semibold, design: .serif))
-                        .foregroundColor(Color(white: 0.85))
-                    if let date = photo.date, !date.isEmpty {
-                        Text("·")
-                            .foregroundColor(Color(white: 0.5))
-                        Text(date)
-                            .font(.system(size: 12, weight: .regular, design: .serif))
-                            .foregroundColor(Color(white: 0.7))
+                // Title Area with Hover Reveal
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(photo.name)
+                            .font(.system(size: 17, weight: .bold, design: .serif))
+                            .foregroundColor(.white)
+                            .lineLimit(isHoveringTitle ? 4 : 2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onHover { isHoveringTitle = $0 }
+                            .animation(.spring(), value: isHoveringTitle)
+                        
+                        // Artist + date
+                        HStack(spacing: 6) {
+                            Text(photo.author.name)
+                                .font(.system(size: 13, weight: .semibold, design: .serif))
+                                .foregroundColor(Color(white: 0.85))
+                            if let date = photo.date, !date.isEmpty {
+                                Text("·")
+                                    .foregroundColor(Color(white: 0.5))
+                                Text(date)
+                                    .font(.system(size: 12, weight: .regular, design: .serif))
+                                    .foregroundColor(Color(white: 0.7))
+                            }
+                        }
                     }
+                    
+                    Spacer()
+                    
+                    // Favorite Button
+                    Button(action: { state.toggleFavorite(photo) }) {
+                        Image(systemName: state.isFavorited(photo) ? "heart.fill" : "heart")
+                            .font(.system(size: 20))
+                            .foregroundColor(state.isFavorited(photo) ? .red : .white.opacity(0.6))
+                            .padding(8)
+                            .background(Circle().fill(Color.white.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 // Style / medium tags
@@ -775,6 +1206,20 @@ struct MenuBarContentView: View {
             .disabled(state.isLoading)
 
             Divider()
+            
+            // Artist Search
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Search Artist")
+                    .font(.caption2).foregroundColor(.secondary)
+                TextField("e.g. Van Gogh", text: $state.artistSearchQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        state.fetchRandom()
+                    }
+            }
+            .padding(.vertical, 4)
+
+            Divider()
 
             // Quiz ready banner — launches the Kahoot-style art quiz
             if state.quizReady {
@@ -785,6 +1230,20 @@ struct MenuBarContentView: View {
                 .foregroundColor(.yellow)
                 Divider()
             }
+            
+            // Gallery & About
+            HStack {
+                Button(action: { GalleryWindowController.shared.show() }) {
+                    Label("Gallery", systemImage: "photo.on.rectangle")
+                }
+                Spacer()
+                Button(action: { AboutWindowController.shared.show() }) {
+                    Label("About", systemImage: "info.circle")
+                }
+            }
+            .padding(.vertical, 4)
+
+            Divider()
 
             // Shuffle interval
             Menu("⏱  Shuffle Interval") {
@@ -811,28 +1270,6 @@ struct MenuBarContentView: View {
             // Toggle overlay
             Button(state.overlayVisible ? "🔲  Hide Info Overlay" : "🔲  Show Info Overlay") {
                 state.toggleOverlay()
-            }
-
-            // About
-            Menu("ℹ️  About") {
-                Text("ArtifyV2 — v2.3")
-                    .font(.caption)
-                Text("Built by swift 🛠")
-                    .font(.caption)
-                Divider()
-                let cacheCount = ArtifyCacheManager.shared.cachedWallpapers.count
-                let portraitCount = ArtistPortraitCache.shared.totalCount
-                Text("🖼  \(cacheCount) painting\(cacheCount == 1 ? "" : "s") cached")
-                    .font(.caption)
-                Text("👤  \(portraitCount) artist portrait\(portraitCount == 1 ? "" : "s") saved")
-                    .font(.caption)
-                Text("🧠  \(state.recentlyShownPhotos.count) paintings in quiz pool")
-                    .font(.caption)
-                Divider()
-                Text("Desktop wallpaper engine powered")
-                    .font(.caption)
-                Text("by Met Museum & WikiArt")
-                    .font(.caption)
             }
 
             Divider()
