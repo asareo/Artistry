@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v2.8: Dynamic scaling (Fit/Fill), recent history duplicate check, git-ready.
+// v2.9: Freshness guarantee (force new downloads), improved error reporting, and search fix.
 
 import AppKit
 import SwiftUI
@@ -235,6 +235,7 @@ class ArtifyState: ObservableObject {
     // Ring buffer of the last 10 successfully shown photos (for quiz)
     private(set) var recentlyShownPhotos: [Photo] = []
     private var photosUntilQuiz: Int = Int.random(in: 5...8)
+    private var consecutiveCachedShown: Int = 0 // Tracks how many cached images shown in a row
 
     private init() {
         // Load favorites from UserDefaults
@@ -317,6 +318,9 @@ class ArtifyState: ObservableObject {
         isLoading = true
         lastError = nil
 
+        // Freshness Guarantee: If we've shown too many cached images in a row,
+        // force a fresh API fetch to get new masterpieces.
+        
         let urlString: String
         if !artistSearchQuery.isEmpty {
             let encodedQuery = artistSearchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
@@ -422,13 +426,19 @@ class ArtifyState: ObservableObject {
         // Serve instantly from local cache if we already downloaded this painting
         let cachedFile = ArtifyCacheManager.shared.cachedWallpapers
             .first { $0.lastPathComponent == "\(photoID).jpg" }
-        if let existing = cachedFile {
+        
+        // If we are NOT in a 'force fresh' mode, we can use the cache
+        if let existing = cachedFile, consecutiveCachedShown < 8 {
+            consecutiveCachedShown += 1
             downloadFailCount = 0  // success path resets failure counter
             applyWallpaper(localURL: existing)
             isLoading = false
             return
         }
 
+        // Otherwise, we must download a fresh copy or we forced a refresh
+        consecutiveCachedShown = 0 // Reset since we are attempting a download
+        
         // Timeout guard — both paths always touch `completed` on the main queue only
         var completed = false
 
@@ -437,7 +447,7 @@ class ArtifyState: ObservableObject {
             completed = true
             self.isLoading = false
             // Timeout = try a different photo, don't give up
-            self.retryWithNewPhoto()
+            self.retryWithNewPhoto(reason: "Download timed out")
         }
 
         // Build a request with a browser User-Agent — some CDNs block default URLSession UA
@@ -480,9 +490,8 @@ class ArtifyState: ObservableObject {
                     self.applyWallpaper(localURL: url)
                 } else {
                     // HTTP error (403/404) or network failure — try a different photo
-                    let code = httpStatus
-                    self.lastError = code >= 400 ? "Image unavailable (\(code)) — trying another…" : "Download failed — trying another…"
-                    self.retryWithNewPhoto()
+                    let reason = error?.localizedDescription ?? "HTTP \(httpStatus)"
+                    self.retryWithNewPhoto(reason: reason)
                 }
             }
         }.resume()
@@ -500,12 +509,19 @@ class ArtifyState: ObservableObject {
 
     // Called when an image download fails (403, 404, timeout, etc.)
     // Automatically fetches a fresh random photo instead of stalling.
-    private func retryWithNewPhoto() {
+    private func retryWithNewPhoto(reason: String? = nil) {
         downloadFailCount += 1
+        if let reason = reason {
+            print("Download failed: \(reason)")
+        }
+        
         if downloadFailCount > maxDownloadRetries {
             // Truly stuck — show cached art and reset
             downloadFailCount = 0
             lastError = "Several images unavailable — showing cached art"
+            if let reason = reason {
+                lastError = "Network error: \(reason). Showing cached art."
+            }
             applyFallbackIfAvailable()
             return
         }
