@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Xcode
+xcuserdata/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+DerivedData/
+build/
+
+# Build artifacts
+ArtifyV2.app/Contents/MacOS/ArtifyV2
+
+# Docker
+artify-core/tmp/
+
+# Go
+artify-core/artify-core
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Caches
+*.log
