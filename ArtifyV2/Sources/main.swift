@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v2.9: Freshness guarantee (force new downloads), improved error reporting, and search fix.
+// v3.0: Network-only mode, shuffled search results, increased storage, and refined dragging.
 
 import AppKit
 import SwiftUI
@@ -54,8 +54,8 @@ class ArtifyCacheManager {
     static let shared = ArtifyCacheManager()
 
     private let cacheDir: URL
-    private let maxCached = 300
-    private let maxCacheBytes: Int64 = 500 * 1024 * 1024  // 500 MB
+    private let maxCached = 2000
+    private let maxCacheBytes: Int64 = 5 * 1024 * 1024 * 1024  // 5 GB
     private(set) var cachedWallpapers: [URL] = []
 
     private init() {
@@ -235,7 +235,8 @@ class ArtifyState: ObservableObject {
     // Ring buffer of the last 10 successfully shown photos (for quiz)
     private(set) var recentlyShownPhotos: [Photo] = []
     private var photosUntilQuiz: Int = Int.random(in: 5...8)
-    private var consecutiveCachedShown: Int = 0 // Tracks how many cached images shown in a row
+    @Published var consecutiveCachedShown: Int = 0 // Tracks how many cached images shown in a row
+    @Published var forceNetworkOnly = false // Bypass cache and force fresh downloads
 
     private init() {
         // Load favorites from UserDefaults
@@ -366,7 +367,8 @@ class ArtifyState: ObservableObject {
                     // 2. Try decoding as an array (Search result)
                     if let searchResp = try? JSONDecoder().decode(APISearchResponse.self, from: data),
                        let photos = searchResp.data, !photos.isEmpty {
-                        let photo = photos[0] // take first hit
+                        // Shuffle results so we don't always show the same 'first' hit
+                        let photo = photos.shuffled()[0] 
                         if !self.artistSearchQuery.isEmpty { self.artistSearchQuery = "" }
                         self.processFetchResult(photo: photo)
                         return
@@ -419,7 +421,7 @@ class ArtifyState: ObservableObject {
     func setWallpaper(from urlString: String, photoID: String) {
         guard let imageURL = URL(string: urlString) else {
             isLoading = false
-            retryWithNewPhoto()
+            retryWithNewPhoto(reason: "Malformed image URL")
             return
         }
 
@@ -428,7 +430,8 @@ class ArtifyState: ObservableObject {
             .first { $0.lastPathComponent == "\(photoID).jpg" }
         
         // If we are NOT in a 'force fresh' mode, we can use the cache
-        if let existing = cachedFile, consecutiveCachedShown < 8 {
+        // But if 'forceNetworkOnly' is ON, we ALWAYS download.
+        if !forceNetworkOnly, let existing = cachedFile, consecutiveCachedShown < 8 {
             consecutiveCachedShown += 1
             downloadFailCount = 0  // success path resets failure counter
             applyWallpaper(localURL: existing)
@@ -624,17 +627,21 @@ class ArtifyState: ObservableObject {
 // we move the window directly, bypassing SwiftUI's event handling.
 
 class DraggableWindow: NSWindow {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 
-    // Use mouseDown to trigger a standard macOS drag.
-    // This is more robust than manually tracking in sendEvent.
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown {
-            // Initiate standard drag immediately on click
-            self.performDrag(with: event)
-        }
-        super.sendEvent(event)
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: bufferingType, defer: flag)
+        self.isMovableByWindowBackground = true // Native macOS dragging
+        self.level = .floating
+        self.backgroundColor = .clear
+        self.isOpaque = false
+        self.hasShadow = true
+    }
+
+    // Capture mouse down to ensure dragging works even over some SwiftUI elements
+    override func mouseDown(with event: NSEvent) {
+        self.performDrag(with: event)
     }
 }
 
@@ -1368,6 +1375,11 @@ struct MenuBarContentView: View {
             // Toggle overlay
             Button(state.overlayVisible ? "🔲  Hide Info Overlay" : "🔲  Show Info Overlay") {
                 state.toggleOverlay()
+            }
+
+            // Force Network Only Toggle
+            Button(state.forceNetworkOnly ? "🌐  Network Only: ON" : "🌐  Network Only: OFF") {
+                state.forceNetworkOnly.toggle()
             }
 
             Divider()
