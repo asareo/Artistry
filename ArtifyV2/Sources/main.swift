@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v2.7: Stability pass, gallery memory fix, artist search fix, photos integration.
+// v2.8: Dynamic scaling (Fit/Fill), recent history duplicate check, git-ready.
 
 import AppKit
 import SwiftUI
@@ -385,7 +385,7 @@ class ArtifyState: ObservableObject {
     }
 
     private func processFetchResult(photo: Photo) {
-        // If we got the same photo as last time...
+        // 1. Same-as-last-one check (API giving us the same ID twice)
         if photo.id == self.lastPhotoID && self.fetchRetryCount < self.maxFetchRetries {
             self.fetchRetryCount += 1
             self.isLoading = false
@@ -394,6 +394,17 @@ class ArtifyState: ObservableObject {
             }
             return
         }
+
+        // 2. Recent history check (Don't show the same image within the last 10)
+        if recentlyShownPhotos.contains(where: { $0.id == photo.id }) && self.fetchRetryCount < self.maxFetchRetries {
+            self.fetchRetryCount += 1
+            self.isLoading = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.fetchRandom(isRetry: true)
+            }
+            return
+        }
+
         self.fetchRetryCount = 0
         self.lastPhotoID = photo.id
         self.currentPhoto = photo
@@ -509,11 +520,25 @@ class ArtifyState: ObservableObject {
     private func applyWallpaper(localURL: URL) {
         currentWallpaperURL = localURL
 
-        let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-            .allowClipping: NSNumber(value: true)
-        ]
+        // Dynamic Scaling: Choose between Fill (crop) and Fit (show all)
+        // based on how well the image aspect ratio matches the screen.
+        let image = NSImage(contentsOf: localURL)
+        let imageSize = image?.size ?? .zero
+
         for screen in NSScreen.screens {
+            let screenRatio = screen.frame.width / screen.frame.height
+            let imageRatio = imageSize.width > 0 ? (imageSize.width / imageSize.height) : screenRatio
+            
+            // If aspect ratios differ by more than 15%, use 'Fit' (allowClipping: false)
+            // so we don't crop off important parts of wide/tall masterpieces.
+            let ratioDiff = abs(screenRatio - imageRatio) / screenRatio
+            let shouldFit = ratioDiff > 0.15
+
+            let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                .allowClipping: NSNumber(value: !shouldFit) // false = Fit (show all), true = Fill (crop)
+            ]
+            
             do {
                 try NSWorkspace.shared.setDesktopImageURL(localURL, for: screen, options: options)
             } catch {
