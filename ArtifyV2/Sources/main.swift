@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v2.6: Favorites system overhaul, Gallery with local Photos integration, git-clean.
+// v2.7: Stability pass, gallery memory fix, artist search fix, photos integration.
 
 import AppKit
 import SwiftUI
@@ -351,50 +351,55 @@ class ArtifyState: ObservableObject {
                 }
 
                 do {
-                    let apiResp = try JSONDecoder().decode(APIResponse.self, from: data)
-                    
-                    // Handle search results (SearchPhotos returns an array, FeatureRandom returns a single object)
-                    // Wait, let's check the APIResponse model.
-                    
-                    if let photo = apiResp.data {
-                        // Success hit
-                        if !self.artistSearchQuery.isEmpty {
-                            self.artistSearchQuery = ""
-                        }
-                        
-                        // If we got the same photo as last time...
-                        if photo.id == self.lastPhotoID && self.fetchRetryCount < self.maxFetchRetries {
-                            self.fetchRetryCount += 1
-                            self.isLoading = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                self.fetchRandom(isRetry: true)
-                            }
-                            return
-                        }
-                        self.fetchRetryCount = 0
-                        self.lastPhotoID = photo.id
-                        self.currentPhoto = photo
-                        self.setWallpaper(from: photo.image_url, photoID: photo.id)
-                    } else {
-                        // No photo found. If we were searching, maybe clear query and retry random
-                        if !self.artistSearchQuery.isEmpty {
-                            self.artistSearchQuery = ""
-                            self.fetchRandom()
-                            return
-                        }
-                        self.lastError = "No photo in response"
-                        self.isLoading = false
+                    // 1. Try decoding as a single photo (Feature Random)
+                    if let apiResp = try? JSONDecoder().decode(APIResponse.self, from: data),
+                       let photo = apiResp.data {
+                        if !self.artistSearchQuery.isEmpty { self.artistSearchQuery = "" }
+                        self.processFetchResult(photo: photo)
+                        return
                     }
+                    
+                    // 2. Try decoding as an array (Search result)
+                    if let searchResp = try? JSONDecoder().decode(APISearchResponse.self, from: data),
+                       let photos = searchResp.data, !photos.isEmpty {
+                        let photo = photos[0] // take first hit
+                        if !self.artistSearchQuery.isEmpty { self.artistSearchQuery = "" }
+                        self.processFetchResult(photo: photo)
+                        return
+                    }
+                    
+                    // If we get here, neither worked
+                    if !self.artistSearchQuery.isEmpty {
+                        self.artistSearchQuery = ""
+                        self.fetchRandom()
+                        return
+                    }
+                    self.lastError = "No photo found in response"
+                    self.isLoading = false
                 } catch {
-                    // Try parsing as array if it's search?
-                    // Let's keep it simple: the search API in Go returns SuccessResponse(photos) where photos is []Photo.
-                    // But APIResponse.data is a single Photo? I need to check Data Models.
                     self.lastError = "Parse error: \(error.localizedDescription)"
                     self.isLoading = false
                 }
             }
         }.resume()
     }
+
+    private func processFetchResult(photo: Photo) {
+        // If we got the same photo as last time...
+        if photo.id == self.lastPhotoID && self.fetchRetryCount < self.maxFetchRetries {
+            self.fetchRetryCount += 1
+            self.isLoading = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.fetchRandom(isRetry: true)
+            }
+            return
+        }
+        self.fetchRetryCount = 0
+        self.lastPhotoID = photo.id
+        self.currentPhoto = photo
+        self.setWallpaper(from: photo.image_url, photoID: photo.id)
+    }
+
 
     func setWallpaper(from urlString: String, photoID: String) {
         guard let imageURL = URL(string: urlString) else {
@@ -791,10 +796,8 @@ struct GalleryItem: View {
             // ── Thumbnail ──────────────────────────────────────────────
             ZStack(alignment: .topTrailing) {
                 Group {
-                    if let url = cachedURL, let img = NSImage(contentsOf: url) {
-                        Image(nsImage: img)
-                            .resizable()
-                            .scaledToFill()
+                    if let url = cachedURL {
+                        ThumbnailImage(url: url)
                     } else {
                         Rectangle()
                             .fill(Color.secondary.opacity(0.15))
@@ -861,14 +864,14 @@ struct GalleryItem: View {
                     HStack(spacing: 8) {
                         if let url = cachedURL {
                             Button(action: { openInPhotos(url) }) {
-                                Label("Open in Photos", systemImage: "photo")
+                                Label("Save to Photos", systemImage: "photo.badge.plus")
                                     .font(.system(size: 10, weight: .semibold))
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.mini)
 
                             Button(action: { NSWorkspace.shared.activateFileViewerSelecting([url]) }) {
-                                Label("Show in Finder", systemImage: "folder")
+                                Label("Finder", systemImage: "folder")
                                     .font(.system(size: 10, weight: .semibold))
                             }
                             .buttonStyle(.bordered)
@@ -928,12 +931,55 @@ struct GalleryItem: View {
     }
 
     private func openInPhotos(_ url: URL) {
-        // Import the image file into Photos.app
-        let script = "osascript -e 'tell application \"Photos\" to import POSIX file \"\(url.path)\"'"
+        // More robust AppleScript for Photos.app import
+        let script = "tell application \"Photos\" to import {POSIX file \"\(url.path)\"}"
+        let osa = "osascript -e '\(script)'"
         let task = Process()
         task.launchPath = "/bin/sh"
-        task.arguments = ["-c", script]
+        task.arguments = ["-c", osa]
         try? task.run()
+    }
+}
+
+/// A stability-focused image view that loads downsampled thumbnails
+/// to prevent crashes when displaying many high-resolution masterpieces.
+struct ThumbnailImage: View {
+    let url: URL
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.secondary.opacity(0.1)
+                    .onAppear { loadThumbnail() }
+            }
+        }
+    }
+
+    private func loadThumbnail() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let options = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return }
+            
+            // Create a 500px thumbnail (large enough for gallery cards but small in memory)
+            let downsampleOptions = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 500
+            ] as CFDictionary
+            
+            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions) {
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 250, height: 250))
+                DispatchQueue.main.async {
+                    self.image = nsImage
+                }
+            }
+        }
     }
 }
 
@@ -1209,8 +1255,19 @@ struct MenuBarContentView: View {
             
             // Artist Search
             VStack(alignment: .leading, spacing: 4) {
-                Text("Search Artist")
-                    .font(.caption2).foregroundColor(.secondary)
+                HStack {
+                    Text("Search Artist")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Spacer()
+                    if !state.artistSearchQuery.isEmpty {
+                        Button("Clear") {
+                            state.artistSearchQuery = ""
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 9))
+                        .foregroundColor(.accentColor)
+                    }
+                }
                 TextField("e.g. Van Gogh", text: $state.artistSearchQuery)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
