@@ -1,5 +1,5 @@
 // ArtifyV2 — Modern macOS Wallpaper App
-// v3.0: Network-only mode, shuffled search results, increased storage, and refined dragging.
+// v3.1: Network debug pass — detailed status and forced network behavior.
 
 import AppKit
 import SwiftUI
@@ -225,6 +225,7 @@ class ArtifyState: ObservableObject {
 
     @Published var currentPhoto: Photo?
     @Published var isLoading = false
+    @Published var loadingStatus: String? // Detailed status (e.g. "Downloading from Wikimedia...")
     @Published var lastError: String?
     @Published var shuffleInterval: TimeInterval = 0 // 0 = off
     @Published var overlayVisible = true
@@ -318,6 +319,7 @@ class ArtifyState: ObservableObject {
 
         isLoading = true
         lastError = nil
+        loadingStatus = "Fetching masterpiece info..."
 
         // Freshness Guarantee: If we've shown too many cached images in a row,
         // force a fresh API fetch to get new masterpieces.
@@ -325,6 +327,7 @@ class ArtifyState: ObservableObject {
         let urlString: String
         if !artistSearchQuery.isEmpty {
             let encodedQuery = artistSearchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            loadingStatus = "Searching for '\(artistSearchQuery)'..."
             urlString = "\(apiBase)/search/photos?q=\(encodedQuery)"
         } else {
             urlString = "\(apiBase)/feature/random"
@@ -442,6 +445,9 @@ class ArtifyState: ObservableObject {
         // Otherwise, we must download a fresh copy or we forced a refresh
         consecutiveCachedShown = 0 // Reset since we are attempting a download
         
+        let host = imageURL.host ?? "server"
+        loadingStatus = "Downloading from \(host)..."
+        
         // Timeout guard — both paths always touch `completed` on the main queue only
         var completed = false
 
@@ -473,34 +479,31 @@ class ArtifyState: ObservableObject {
             var stableURL: URL? = nil
             if downloadOK, let tmpURL = localURL {
                 stableURL = ArtifyCacheManager.shared.save(tempURL: tmpURL, photoID: photoID)
-                if stableURL == nil {
-                    let fallbackTmp = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("artify_\(photoID).jpg")
-                    try? FileManager.default.removeItem(at: fallbackTmp)
-                    if (try? FileManager.default.copyItem(at: tmpURL, to: fallbackTmp)) != nil {
-                        stableURL = fallbackTmp
-                    }
-                }
             }
-
+            
             DispatchQueue.main.async {
-                guard !completed else { return }
-                completed = true
-                self.isLoading = false
-
-                if let url = stableURL {
-                    self.downloadFailCount = 0  // reset on success
-                    self.applyWallpaper(localURL: url)
-                } else {
-                    // HTTP error (403/404) or network failure — try a different photo
-                    let reason = error?.localizedDescription ?? "HTTP \(httpStatus)"
-                    self.retryWithNewPhoto(reason: reason)
+                if !completed {
+                    completed = true
+                    if let stable = stableURL {
+                        self.downloadFailCount = 0
+                        self.applyWallpaper(localURL: stable)
+                        self.isLoading = false
+                    } else {
+                        self.retryWithNewPhoto(reason: "Download failed (status \(httpStatus))")
+                    }
                 }
             }
         }.resume()
     }
 
     private func applyFallbackIfAvailable() {
+        // If the user wants Network Only, DO NOT show cached art even if retries fail.
+        // This makes the network errors visible so we can debug them.
+        if forceNetworkOnly {
+            lastError = "Network Only Mode: Failed to download masterpiece. (No fallback)"
+            return
+        }
+
         // Only use cached fallback as a last resort (all retries exhausted)
         guard ArtifyCacheManager.shared.hasCache,
               let fallback = ArtifyCacheManager.shared.randomCached(excluding: currentWallpaperURL) else {
@@ -516,6 +519,7 @@ class ArtifyState: ObservableObject {
         downloadFailCount += 1
         if let reason = reason {
             print("Download failed: \(reason)")
+            loadingStatus = "Retrying... (\(reason))"
         }
         
         if downloadFailCount > maxDownloadRetries {
@@ -528,10 +532,11 @@ class ArtifyState: ObservableObject {
             applyFallbackIfAvailable()
             return
         }
-        // Kick off a fresh API request immediately
+
+        // Kick off a fresh API request after a short delay to prevent fast-looping
         lastError = nil
-        isLoading = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        isLoading = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             self?.fetchRandom(isRetry: true)
         }
     }
@@ -634,6 +639,8 @@ class DraggableWindow: NSWindow {
         super.init(contentRect: contentRect, styleMask: style, backing: bufferingType, defer: flag)
         self.isMovableByWindowBackground = true // Native macOS dragging
         self.level = .floating
+        self.hidesOnDeactivate = false // CRITICAL: Keep interactable even when clicking desktop
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.backgroundColor = .clear
         self.isOpaque = false
         self.hasShadow = true
@@ -689,7 +696,7 @@ struct AboutView: View {
             Text("ArtifyV2")
                 .font(.system(size: 24, weight: .bold))
             
-            Text("v2.5")
+            Text("v2.6")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
@@ -1180,14 +1187,21 @@ struct OverlayView: View {
                 }
 
             } else if state.isLoading {
-                HStack(spacing: 8) {
+                VStack(spacing: 8) {
                     ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .scaleEffect(0.7)
-                    Text("Loading artwork…")
-                        .font(.system(size: 13, design: .serif))
-                        .foregroundColor(.white)
+                        .scaleEffect(0.8)
+                    if let status = state.loadingStatus {
+                        Text(status)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Curating Masterpiece...")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 4)
             } else {
                 Text("No artwork loaded")
                     .font(.system(size: 13, design: .serif))
