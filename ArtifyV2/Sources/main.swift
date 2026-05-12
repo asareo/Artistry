@@ -232,6 +232,8 @@ class ArtifyState: ObservableObject {
     @Published var quizReady = false   // true = menu bar shows "Quiz Ready" button
     @Published var favoritedIDs: Set<String> = []
     @Published var artistSearchQuery: String = ""
+    @Published var discoveryQuery: String = ""
+    @Published var isDiscovering = false
 
     // Ring buffer of the last 10 successfully shown photos (for quiz)
     private(set) var recentlyShownPhotos: [Photo] = []
@@ -299,6 +301,30 @@ class ArtifyState: ObservableObject {
     private let downloadTimeoutSeconds: TimeInterval = 20  // generous for large art images
 
     let apiBase = "http://localhost:7300/api"
+
+    func discoverArt() {
+        guard !discoveryQuery.isEmpty else { return }
+        isDiscovering = true
+        let query = discoveryQuery
+        discoveryQuery = ""
+        
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "\(apiBase)/discover?q=\(encoded)") else {
+            isDiscovering = false
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            DispatchQueue.main.async {
+                self?.isDiscovering = false
+                // Fetch a random photo immediately to show a new result from the discovery
+                self?.fetchRandom()
+            }
+        }.resume()
+    }
 
     // Custom URLSession with tight timeout
     private lazy var session: URLSession = {
@@ -607,8 +633,8 @@ class ArtifyState: ObservableObject {
         shuffleTimer = nil
         guard interval > 0 else { return }
         shuffleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            // Don't auto-shuffle while quiz is active
-            guard self?.quizReady == false else { return }
+            // Only pause shuffle if the user is actually IN a quiz window right now
+            guard QuizWindowController.shared.isPresented == false else { return }
             self?.fetchRandom()
         }
     }
@@ -1340,6 +1366,29 @@ struct MenuBarContentView: View {
 
             Divider()
 
+            // Discovery Search (Seeds DB)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Discover & Add New Art")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Spacer()
+                    if state.isDiscovering {
+                        ProgressView().scaleEffect(0.5)
+                    }
+                }
+                TextField("e.g. Surrealism, Monet...", text: $state.discoveryQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        state.discoverArt()
+                    }
+                Text("Seeds up to 50 new pieces into your library")
+                    .font(.system(size: 8))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 4)
+
+            Divider()
+
             // Quiz ready banner — launches the Kahoot-style art quiz
             if state.quizReady {
                 Button("🧠  Art Quiz Ready! Start →") {
@@ -1614,6 +1663,8 @@ class QuizState: ObservableObject {
 class QuizWindowController {
     static let shared = QuizWindowController()
     private var window: NSWindow?
+    
+    var isPresented: Bool { window != nil }
 
     func present(photos: [Photo]) {
         guard let screen = NSScreen.main else { return }
