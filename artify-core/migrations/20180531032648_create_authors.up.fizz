@@ -1,0 +1,8 @@
+create_table("authors") {
+	t.Column("id", "uuid", {"primary": true})
+	t.Column("name", "string", {})
+	t.Column("born", "string", {})
+	t.Column("died", "string", {})
+	t.Column("nationality", "string", {})
+	t.Column("wikipedia", "string", {})
+}

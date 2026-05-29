@@ -1,0 +1,27 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+artify
+artify-core
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dep
+vendor/
+.idea/
+
+# Mac
+.DS_Store
+
+# Config
+constant/constant.go
+
+# Dist
+dist

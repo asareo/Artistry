@@ -1,0 +1,5 @@
+create_table("dashboards") {
+	t.Column("id", "uuid", {"primary": true})
+	t.Column("type", "string", {})
+	t.Column("photo_id", "uuid", {})
+}
