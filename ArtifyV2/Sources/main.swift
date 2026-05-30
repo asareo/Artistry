@@ -1340,31 +1340,6 @@ struct MenuBarContentView: View {
             .disabled(state.isLoading)
 
             Divider()
-            
-            // Artist Search
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Search Artist")
-                        .font(.caption2).foregroundColor(.secondary)
-                    Spacer()
-                    if !state.artistSearchQuery.isEmpty {
-                        Button("Clear") {
-                            state.artistSearchQuery = ""
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 9))
-                        .foregroundColor(.accentColor)
-                    }
-                }
-                TextField("e.g. Van Gogh", text: $state.artistSearchQuery)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        state.fetchRandom()
-                    }
-            }
-            .padding(.vertical, 4)
-
-            Divider()
 
             // Discovery Search (Seeds DB)
             VStack(alignment: .leading, spacing: 4) {
@@ -2020,6 +1995,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popover: NSPopover!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Build a standard Edit menu in the system menu bar so cut/copy/paste shortcuts function
+        setupEditMenu()
+
         // Create menu bar icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -2048,6 +2026,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Show overlay on desktop and kick off first fetch
         OverlayWindowController.shared.show()
         ArtifyState.shared.fetchRandom()
+    }
+
+    private func setupEditMenu() {
+        let mainMenu = NSMenu()
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        
+        editMenuItem.submenu = editMenu
+        NSApplication.shared.mainMenu = mainMenu
     }
 
     @objc func togglePopover() {
