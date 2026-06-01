@@ -8,7 +8,7 @@ import sys
 import time
 
 # Use the environment variable if present (e.g. Supabase connection pooler), otherwise fall back to Docker-internal DB
-DB_DSN = os.environ.get("DATABASE_URL", "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable")
+DB_DSN = os.environ.get("SUPABASE_DATABASE_URL", os.environ.get("DATABASE_URL", "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable"))
 
 def build_jeopardy_blurb(title, artist, bio, date, medium, loc, style, culture):
     parts = [f"JEOPARDY KEY: \"{title}\" by {artist}."]
