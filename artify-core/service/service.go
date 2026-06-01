@@ -2,6 +2,7 @@ package service
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/NghiaTranUIT/artify-core/constant"
 	"github.com/NghiaTranUIT/artify-core/resources"
@@ -34,8 +35,12 @@ func (s *Service) Start() {
 	s.router.ApplyRoutes(echo)
 
 	// Config
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = constant.AppPort
+	}
 	config := &http.Server{
-		Addr: constant.AppHost + ":" + constant.AppPort,
+		Addr: constant.AppHost + ":" + port,
 	}
 
 	// Start

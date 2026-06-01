@@ -3,11 +3,12 @@ import requests
 import uuid
 import datetime
 import psycopg2
+import os
 import sys
 import time
 
-# Use the Docker-internal DB name 'db' instead of 'localhost' when running inside container
-DB_DSN = "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable"
+# Use the environment variable if present (e.g. Supabase connection pooler), otherwise fall back to Docker-internal DB
+DB_DSN = os.environ.get("DATABASE_URL", "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable")
 
 def build_jeopardy_blurb(title, artist, bio, date, medium, loc, style, culture):
     parts = [f"JEOPARDY KEY: \"{title}\" by {artist}."]

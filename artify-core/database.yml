@@ -1,10 +1,6 @@
 development:
   dialect: postgres
-  database: artify-core_development
-  user: nghiatran
-  password: Password1
-  host: db
-  pool: 5
+  url: {{envOr "DATABASE_URL" "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable"}}
 
 test:
   url: {{envOr "TEST_DATABASE_URL" "postgres://postgres:postgres@127.0.0.1:5432/artify-core_test?sslmode=disable"}}

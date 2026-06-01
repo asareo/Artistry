@@ -12,4 +12,10 @@ ADD . /go/src/github.com/NghiaTranUIT/artify-core
 
 RUN go mod download
 
+# Build the compiled Go binary
+RUN go build -o artify-app main.go
+
 EXPOSE 7300
+
+# Default startup command
+CMD ["./artify-app"]
