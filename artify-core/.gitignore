@@ -21,7 +21,6 @@ vendor/
 .DS_Store
 
 # Config
-constant/constant.go
 
 # Dist
 dist
