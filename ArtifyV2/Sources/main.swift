@@ -300,7 +300,7 @@ class ArtifyState: ObservableObject {
     private let maxDownloadRetries = 8  // max image download failures before giving up
     private let downloadTimeoutSeconds: TimeInterval = 20  // generous for large art images
 
-    let apiBase = "http://localhost:7300/api"
+    let apiBase = "https://artistry-wsnw.onrender.com/api"
 
     func discoverArt() {
         guard !discoveryQuery.isEmpty else { return }
