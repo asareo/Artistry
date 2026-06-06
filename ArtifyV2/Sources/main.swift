@@ -222,6 +222,14 @@ class ArtistPortraitCache {
 
 class ArtifyState: ObservableObject {
     static let shared = ArtifyState()
+    static let currentVersion = "3.2"
+
+    @Published var updateAvailable = false
+    @Published var updateNotes = ""
+    @Published var updateURL = ""
+    @Published var updateVersion = ""
+    @Published var isCheckingForUpdates = false
+    @Published var updateCheckMessage: String? = nil
 
     @Published var currentPhoto: Photo?
     @Published var isLoading = false
@@ -647,6 +655,95 @@ class ArtifyState: ObservableObject {
             OverlayWindowController.shared.hide()
         }
     }
+
+    func checkForUpdates(manual: Bool = false) {
+        isCheckingForUpdates = true
+        updateCheckMessage = manual ? "Checking for updates..." : nil
+        
+        guard let url = URL(string: "\(apiBase)/version/update?build_version=\(Self.currentVersion)") else {
+            isCheckingForUpdates = false
+            return
+        }
+        
+        session.dataTask(with: url) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isCheckingForUpdates = false
+                
+                if let error = error {
+                    if manual {
+                        self.updateCheckMessage = "Connection error: \(error.localizedDescription)"
+                    }
+                    return
+                }
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    if manual {
+                        self.updateCheckMessage = "Invalid response from server"
+                    }
+                    return
+                }
+                
+                if httpResponse.statusCode == 204 {
+                    if manual {
+                        self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
+                    }
+                    return
+                }
+                
+                guard let data = data else {
+                    if manual {
+                        self.updateCheckMessage = "Empty update response"
+                    }
+                    return
+                }
+                
+                struct UpdateResponse: Codable {
+                    struct UpdateData: Codable {
+                        let build_version: String
+                        let url: String
+                        let notes: String?
+                    }
+                    let code: Int
+                    let message: String
+                    let data: UpdateData?
+                }
+                
+                do {
+                    let decoder = JSONDecoder()
+                    let resp = try decoder.decode(UpdateResponse.self, from: data)
+                    if let update = resp.data {
+                        self.updateAvailable = true
+                        self.updateNotes = update.notes ?? ""
+                        self.updateURL = update.url
+                        self.updateVersion = update.build_version
+                        if manual {
+                            self.updateCheckMessage = "New version \(update.build_version) is available!"
+                        }
+                        
+                        let alert = NSAlert()
+                        alert.messageText = "Update Available"
+                        alert.informativeText = "A new version of Artify (v\(update.build_version)) is available.\n\nRelease Notes:\n\(update.notes ?? "No release notes provided.")"
+                        alert.addButton(withTitle: "Download Now")
+                        alert.addButton(withTitle: "Later")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            if let updateURL = URL(string: update.url) {
+                                NSWorkspace.shared.open(updateURL)
+                            }
+                        }
+                    } else {
+                        if manual {
+                            self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
+                        }
+                    }
+                } catch {
+                    if manual {
+                        self.updateCheckMessage = "Failed to parse update info"
+                    }
+                }
+            }
+        }.resume()
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -722,7 +819,7 @@ struct AboutView: View {
             Text("ArtifyV2")
                 .font(.system(size: 24, weight: .bold))
             
-            Text("v2.6")
+            Text("v\(ArtifyState.currentVersion)")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
@@ -1319,25 +1416,117 @@ struct MenuBarContentView: View {
     @ObservedObject private var state = ArtifyState.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // Current painting info
-            if let photo = state.currentPhoto {
-                Text(photo.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text("by \(photo.author.name)")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                Divider()
+        VStack(alignment: .leading, spacing: 6) {
+            // Header with current artwork + gear Settings menu
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let photo = state.currentPhoto {
+                        Text(photo.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text("by \(photo.author.name)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Artify")
+                            .font(.headline)
+                        Text("No photo loaded")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+                
+                // Unified Settings menu (gear icon)
+                Menu {
+                    // Shuffle interval sub-menu
+                    Menu("⏱  Shuffle Interval") {
+                        Button(state.shuffleInterval == 0 ? "✓ Off" : "Off") {
+                            state.setShuffleInterval(0)
+                        }
+                        Button(state.shuffleInterval == 30 ? "✓ 30 sec" : "30 sec") {
+                            state.setShuffleInterval(30)
+                        }
+                        Button(state.shuffleInterval == 60 ? "✓ 1 min" : "1 min") {
+                            state.setShuffleInterval(60)
+                        }
+                        Button(state.shuffleInterval == 300 ? "✓ 5 min" : "5 min") {
+                            state.setShuffleInterval(300)
+                        }
+                        Button(state.shuffleInterval == 600 ? "✓ 10 min" : "10 min") {
+                            state.setShuffleInterval(600)
+                        }
+                        Button(state.shuffleInterval == 1800 ? "✓ 30 min" : "30 min") {
+                            state.setShuffleInterval(1800)
+                        }
+                    }
+
+                    // Toggles
+                    Button(state.overlayVisible ? "🔲  Hide Info Overlay" : "🔲  Show Info Overlay") {
+                        state.toggleOverlay()
+                    }
+
+                    Button(state.forceNetworkOnly ? "🌐  Network Only: ON" : "🌐  Network Only: OFF") {
+                        state.forceNetworkOnly.toggle()
+                    }
+
+                    Divider()
+
+                    // Check for updates
+                    Button(state.isCheckingForUpdates ? "⏳  Checking..." : "🔄  Check for Updates...") {
+                        state.checkForUpdates(manual: true)
+                    }
+                    .disabled(state.isCheckingForUpdates)
+
+                    Button("ℹ️  About Artify") {
+                        AboutWindowController.shared.show()
+                    }
+
+                    Divider()
+
+                    Button("Quit") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 24, height: 24)
             }
 
-            // Randomize button
-            Button(state.isLoading ? "⏳  Loading…" : "🎲  Randomize") {
-                ArtifyState.shared.fetchRandom()
+            Divider()
+
+            // Primary actions row (Randomize + Gallery)
+            HStack(spacing: 8) {
+                Button(action: {
+                    state.fetchRandom()
+                }) {
+                    HStack {
+                        if state.isLoading {
+                            ProgressView().scaleEffect(0.5).frame(width: 14, height: 14)
+                            Text("Loading…")
+                        } else {
+                            Text("🎲  Random")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .keyboardShortcut("r")
+                .disabled(state.isLoading)
+
+                Button(action: {
+                    GalleryWindowController.shared.show()
+                }) {
+                    HStack {
+                        Image(systemName: "photo.on.rectangle")
+                        Text("Gallery")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
-            .keyboardShortcut("r")
-            .disabled(state.isLoading)
 
             Divider()
 
@@ -1348,7 +1537,7 @@ struct MenuBarContentView: View {
                         .font(.caption2).foregroundColor(.secondary)
                     Spacer()
                     if state.isDiscovering {
-                        ProgressView().scaleEffect(0.5)
+                        ProgressView().scaleEffect(0.4).frame(width: 12, height: 12)
                     }
                 }
                 TextField("e.g. Surrealism, Monet...", text: $state.discoveryQuery)
@@ -1356,87 +1545,43 @@ struct MenuBarContentView: View {
                     .onSubmit {
                         state.discoverArt()
                     }
-                Text("Seeds up to 50 new pieces into your library")
-                    .font(.system(size: 8))
-                    .foregroundColor(.secondary)
             }
-            .padding(.vertical, 4)
-
-            Divider()
 
             // Quiz ready banner — launches the Kahoot-style art quiz
             if state.quizReady {
-                Button("🧠  Art Quiz Ready! Start →") {
+                Divider()
+                Button(action: {
                     let photos = Array(ArtifyState.shared.recentlyShownPhotos.suffix(5))
                     QuizWindowController.shared.present(photos: photos)
+                }) {
+                    HStack {
+                        Text("🧠  Art Quiz Ready! Start →")
+                            .font(.headline)
+                            .foregroundColor(.yellow)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .padding(.vertical, 4)
+                    .background(Color.yellow.opacity(0.15))
+                    .cornerRadius(6)
                 }
-                .foregroundColor(.yellow)
-                Divider()
-            }
-            
-            // Gallery & About
-            HStack {
-                Button(action: { GalleryWindowController.shared.show() }) {
-                    Label("Gallery", systemImage: "photo.on.rectangle")
-                }
-                Spacer()
-                Button(action: { AboutWindowController.shared.show() }) {
-                    Label("About", systemImage: "info.circle")
-                }
-            }
-            .padding(.vertical, 4)
-
-            Divider()
-
-            // Shuffle interval
-            Menu("⏱  Shuffle Interval") {
-                Button(state.shuffleInterval == 0 ? "✓ Off" : "Off") {
-                    state.setShuffleInterval(0)
-                }
-                Button(state.shuffleInterval == 30 ? "✓ 30 sec" : "30 sec") {
-                    state.setShuffleInterval(30)
-                }
-                Button(state.shuffleInterval == 60 ? "✓ 1 min" : "1 min") {
-                    state.setShuffleInterval(60)
-                }
-                Button(state.shuffleInterval == 300 ? "✓ 5 min" : "5 min") {
-                    state.setShuffleInterval(300)
-                }
-                Button(state.shuffleInterval == 600 ? "✓ 10 min" : "10 min") {
-                    state.setShuffleInterval(600)
-                }
-                Button(state.shuffleInterval == 1800 ? "✓ 30 min" : "30 min") {
-                    state.setShuffleInterval(1800)
-                }
+                .buttonStyle(.plain)
             }
 
-            // Toggle overlay
-            Button(state.overlayVisible ? "🔲  Hide Info Overlay" : "🔲  Show Info Overlay") {
-                state.toggleOverlay()
-            }
-
-            // Force Network Only Toggle
-            Button(state.forceNetworkOnly ? "🌐  Network Only: ON" : "🌐  Network Only: OFF") {
-                state.forceNetworkOnly.toggle()
-            }
-
-            Divider()
-
-            // Error display
+            // Status or Error notifications in a tiny font to preserve vertical height
             if let error = state.lastError {
-                Text("⚠️ \(error)")
-                    .font(.caption)
-                    .foregroundColor(.orange)
                 Divider()
+                Text("⚠️ \(error)")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange)
+            } else if let status = state.updateCheckMessage {
+                Divider()
+                Text(status)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
             }
-
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
         }
-        .padding(6)
-        .frame(minWidth: 240)
+        .padding(10)
+        .frame(width: 250)
     }
 }
 
