@@ -6,9 +6,44 @@ import psycopg2
 import os
 import sys
 import time
+import re
 
 # Use the environment variable if present (e.g. Supabase connection pooler), otherwise fall back to Docker-internal DB
-DB_DSN = os.environ.get("SUPABASE_DATABASE_URL", "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable")
+DB_DSN = os.environ.get("SUPABASE_DATABASE_URL", os.environ.get("DATABASE_URL", "postgres://nghiatran:Password1@db:5432/artify-core_development?sslmode=disable"))
+
+COMMON_MAPPINGS = {
+    "picasso": "pablo-picasso",
+    "van gogh": "vincent-van-gogh",
+    "da vinci": "leonardo-da-vinci",
+    "monet": "claude-monet",
+    "degas": "edgar-degas",
+    "klimt": "gustav-klimt",
+    "warhol": "andy-warhol",
+    "dalí": "salvador-dali",
+    "dali": "salvador-dali",
+    "rembrandt": "rembrandt",
+    "vermeer": "johannes-vermeer",
+    "botticelli": "sandro-botticelli",
+    "michelangelo": "michelangelo",
+    "raphael": "raphael",
+    "hokusai": "katsushika-hokusai",
+    "basquiat": "jean-michel-basquiat",
+    "toulouse-lautrec": "henri-de-toulouse-lautrec",
+    "toulouse lautrec": "henri-de-toulouse-lautrec",
+    "la tour": "georges-de-la-tour",
+    "de la tour": "georges-de-la-tour",
+}
+
+def make_slug(name):
+    # Check common mapped abbreviations first
+    short_name = name.lower().strip()
+    if short_name in COMMON_MAPPINGS:
+        return COMMON_MAPPINGS[short_name]
+    
+    # Otherwise, generate standard slug
+    cleaned = re.sub(r"['.()\"]", "", name.lower())
+    slug = re.sub(r"[\s-]+", "-", cleaned).strip("-")
+    return slug
 
 def build_jeopardy_blurb(title, artist, bio, date, medium, loc, style, culture):
     parts = [f"JEOPARDY KEY: \"{title}\" by {artist}."]
@@ -20,40 +55,119 @@ def build_jeopardy_blurb(title, artist, bio, date, medium, loc, style, culture):
     if loc: parts.append(f"Currently housed at: {loc}.")
     return " ".join(parts)
 
-def discover_and_seed(query):
-    print(f"Discovering new art for: {query}")
+def fetch_wikiart_paintings(artist_slug):
+    print(f"Checking WikiArt for slug: {artist_slug}")
+    url = f"https://www.wikiart.org/en/App/Painting/PaintingsByArtist?artistUrl={artist_slug}&json=2"
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"WikiArt returned status code: {resp.status_code}")
+            return []
+        
+        results = resp.json()
+        if not isinstance(results, list):
+            return []
+        
+        paintings = []
+        # Limit to top 50 paintings to keep seeding lightweight
+        for p in results[:50]:
+            img_url = p.get("image")
+            if not img_url:
+                continue
+            
+            # Standardize image size suffix if present
+            if "!Large.jpg" not in img_url:
+                img_url = img_url + "!Large.jpg"
+                
+            title = p.get("title", "Untitled")
+            artist = p.get("artistName", "Unknown")
+            year = p.get("yearAsString", p.get("completitionYear", ""))
+            
+            # Resolve style based on year safely
+            style = "Classical Art"
+            if year:
+                try:
+                    year_digits = re.sub(r"\D", "", str(year))
+                    if year_digits and int(year_digits) > 1900:
+                        style = "Modern Art"
+                except:
+                    pass
+
+            paintings.append({
+                "title": title,
+                "artist": artist,
+                "artist_bio": artist,
+                "nationality": "",
+                "date": str(year) if year else "",
+                "style": style,
+                "medium": "Oil painting",
+                "dimensions": f"{p.get('width', 0)} x {p.get('height', 0)}",
+                "location": "Private Collection / Museum",
+                "image_url": img_url,
+                "source": "WikiArt"
+            })
+        return paintings
+    except Exception as e:
+        print(f"Error calling WikiArt API: {e}")
+        return []
+
+def fetch_met_paintings(query):
+    print(f"Falling back to Met Museum search for: {query}")
     search_url = f"https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&q={query}"
     
-    resp = requests.get(search_url)
-    if resp.status_code != 200: return
-    
-    object_ids = resp.json().get("objectIDs", [])
-    if not object_ids: return
-    
-    paintings = []
-    # Fetch top 50 matches
-    for obj_id in object_ids[:50]:
-        obj_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{obj_id}"
-        obj_resp = requests.get(obj_url)
-        if obj_resp.status_code != 200: continue
+    try:
+        resp = requests.get(search_url, timeout=10)
+        if resp.status_code != 200: return []
         
-        d = obj_resp.json()
-        if not d.get("primaryImage") or not d.get("artistDisplayName"): continue
+        object_ids = resp.json().get("objectIDs", [])
+        if not object_ids: return []
         
-        artist = d.get("artistDisplayName", "Unknown")
-        title = d.get("title", "Untitled")
-        
-        paintings.append({
-            "title": title, "artist": artist, "artist_bio": d.get("artistDisplayBio", ""),
-            "nationality": d.get("artistNationality", ""), "date": d.get("objectDate", ""),
-            "style": d.get("period", d.get("department", "")),
-            "medium": d.get("medium", ""), "dimensions": d.get("dimensions", ""),
-            "location": d.get("repository", "Met Museum"),
-            "image_url": d.get("primaryImage"), "source": "Met Museum Discover"
-        })
-        time.sleep(0.05)
+        paintings = []
+        for obj_id in object_ids[:50]:
+            obj_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{obj_id}"
+            obj_resp = requests.get(obj_url, timeout=5)
+            if obj_resp.status_code != 200: continue
+            
+            d = obj_resp.json()
+            if not d.get("primaryImage") or not d.get("artistDisplayName"): continue
+            
+            artist = d.get("artistDisplayName", "Unknown")
+            title = d.get("title", "Untitled")
+            
+            paintings.append({
+                "title": title, "artist": artist, "artist_bio": d.get("artistDisplayBio", ""),
+                "nationality": d.get("artistNationality", ""), "date": d.get("objectDate", ""),
+                "style": d.get("period", d.get("department", "")),
+                "medium": d.get("medium", ""), "dimensions": d.get("dimensions", ""),
+                "location": d.get("repository", "Met Museum"),
+                "image_url": d.get("primaryImage"), "source": "Met Museum Discover"
+            })
+            time.sleep(0.05)
+        return paintings
+    except Exception as e:
+        print(f"Error calling Met Museum API: {e}")
+        return []
 
-    # Insert into DB
+def discover_and_seed(query):
+    print(f"Starting art discovery for: {query}")
+    
+    # 1. Attempt WikiArt first
+    slug = make_slug(query)
+    paintings = fetch_wikiart_paintings(slug)
+    
+    # 2. Fallback to Met Museum if WikiArt returned nothing
+    if not paintings:
+        paintings = fetch_met_paintings(query)
+        
+    if not paintings:
+        print("No paintings found from either WikiArt or Met Museum.")
+        return
+        
+    print(f"Found {len(paintings)} paintings. Seeding database...")
+    
+    # 3. Insert into DB
     try:
         conn = psycopg2.connect(DB_DSN)
         cur = conn.cursor()
@@ -83,4 +197,5 @@ def discover_and_seed(query):
         print(f"Error: {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1: discover_and_seed(sys.argv[1])
+    if len(sys.argv) > 1:
+        discover_and_seed(sys.argv[1])
