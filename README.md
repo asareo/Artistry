@@ -1,6 +1,6 @@
-# ArtifyV2 — Native macOS Masterpiece Engine
+# Artistry — Native macOS Masterpiece Engine
 
-ArtifyV2 is a native macOS menu bar application that delivers an educational art experience directly to your desktop. It transforms your wallpaper into a rotating gallery of world-class masterpieces while providing historical context through an unobtrusive overlay.
+Artistry is a native macOS menu bar application that delivers an educational art experience directly to your desktop. It transforms your wallpaper into a rotating gallery of world-class masterpieces while providing historical context through an unobtrusive overlay.
 
 ---
 
@@ -18,7 +18,7 @@ ArtifyV2 is a native macOS menu bar application that delivers an educational art
 ## Architecture & Deployment
 
 The application is split into two parts:
-1. **Client**: A native Swift macOS menu bar app (`ArtifyV2`).
+1. **Client**: A native Swift macOS menu bar app (`Artistry`).
 2. **Backend**: A Go-based API (`artify-core`) hosted on **Render** (`https://artistry-wsnw.onrender.com`) and connected to a **Supabase PostgreSQL** cloud database.
 
 ### Seeding & Discovering Art
@@ -34,17 +34,17 @@ Whenever a user inputs a query in the "Discover & Add New Art" field:
 To compile the native macOS application:
 
 ```bash
-swiftc -O ArtifyV2/Sources/main.swift -o ArtifyV2.app/Contents/MacOS/ArtifyV2
+swiftc -O ArtifyV2/Sources/main.swift -o Artistry.app/Contents/MacOS/Artistry
 ```
 
-Once compiled, you can run `ArtifyV2.app` or zip it to share it with friends.
+Once compiled, you can run `Artistry.app` or zip it to share it with friends.
 
 ---
 
 ## For Partners & Testers
 
 ### "Do I need Docker?"
-**No.** Docker is no longer required to run the app. It communicates with the live Render cloud backend automatically. You can open `ArtifyV2.app` and it will work immediately out of the box.
+**No.** Docker is no longer required to run the app. It communicates with the live Render cloud backend automatically. You can open `Artistry.app` and it will work immediately out of the box.
 
 ### "How do updates work?"
 If Swift code changes are made (like UI updates), click the **Check for Updates...** button under the gear settings icon `⚙️` in the popover. It queries the backend to check if a newer client binary has been published.

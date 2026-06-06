@@ -1,4 +1,4 @@
-// ArtifyV2 — Modern macOS Wallpaper App
+// Artistry — Modern macOS Wallpaper App
 // v3.1: Network debug pass — detailed status and forced network behavior.
 
 import AppKit
@@ -60,7 +60,7 @@ class ArtifyCacheManager {
 
     private init() {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        cacheDir = base.appendingPathComponent("ArtifyV2", isDirectory: true)
+        cacheDir = base.appendingPathComponent("Artistry", isDirectory: true)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
         loadExistingCache()
     }
@@ -145,7 +145,7 @@ class ArtistPortraitCache {
 
     private init() {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        portraitDir = base.appendingPathComponent("ArtifyV2/portraits", isDirectory: true)
+        portraitDir = base.appendingPathComponent("Artistry/portraits", isDirectory: true)
         try? FileManager.default.createDirectory(at: portraitDir, withIntermediateDirectories: true)
         loadExisting()
     }
@@ -187,7 +187,7 @@ class ArtistPortraitCache {
             completion([]); return
         }
         var req = URLRequest(url: url)
-        req.setValue("ArtifyV2/1.0 (educational art app)", forHTTPHeaderField: "User-Agent")
+        req.setValue("Artistry/1.0 (educational art app)", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self = self,
                   let data = data,
@@ -792,7 +792,7 @@ class AboutWindowController {
                 backing: .buffered, defer: false
             )
             win.center()
-            win.title = "About ArtifyV2"
+            win.title = "About Artistry"
             win.titlebarAppearsTransparent = true
             win.isMovableByWindowBackground = true
             
@@ -816,7 +816,7 @@ struct AboutView: View {
                 .foregroundColor(.accentColor)
                 .padding(.top, 40)
             
-            Text("ArtifyV2")
+            Text("Artistry")
                 .font(.system(size: 24, weight: .bold))
             
             Text("v\(ArtifyState.currentVersion)")
