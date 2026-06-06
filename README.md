@@ -34,7 +34,7 @@ Whenever a user inputs a query in the "Discover & Add New Art" field:
 To compile the native macOS application:
 
 ```bash
-swiftc -O ArtifyV2/Sources/main.swift -o Artistry.app/Contents/MacOS/Artistry
+swiftc -O Artistry/Sources/main.swift -o Artistry.app/Contents/MacOS/Artistry
 ```
 
 Once compiled, you can run `Artistry.app` or zip it to share it with friends.
