@@ -235,7 +235,7 @@ class ArtifyState: ObservableObject {
     @Published var isLoading = false
     @Published var loadingStatus: String? // Detailed status (e.g. "Downloading from Wikimedia...")
     @Published var lastError: String?
-    @Published var shuffleInterval: TimeInterval = 0 // 0 = off
+    @Published var shuffleInterval: TimeInterval = 180 // 180 = 3 min default
     @Published var overlayVisible = true
     @Published var quizReady = false   // true = menu bar shows "Quiz Ready" button
     @Published var favoritedIDs: Set<String> = []
@@ -247,13 +247,15 @@ class ArtifyState: ObservableObject {
     private(set) var recentlyShownPhotos: [Photo] = []
     private var photosUntilQuiz: Int = Int.random(in: 5...8)
     @Published var consecutiveCachedShown: Int = 0 // Tracks how many cached images shown in a row
-    @Published var forceNetworkOnly = false // Bypass cache and force fresh downloads
+    @Published var forceNetworkOnly = true // Default to fresh network downloads
 
     private init() {
         // Load favorites from UserDefaults
         if let saved = UserDefaults.standard.stringArray(forKey: "ArtifyFavoriteIDs") {
             favoritedIDs = Set(saved)
         }
+        // Initialize default shuffle interval to 3 minutes
+        setShuffleInterval(180)
     }
 
     // ── Favorites persistence ──────────────────────────────────────────
@@ -744,6 +746,47 @@ class ArtifyState: ObservableObject {
             }
         }.resume()
     }
+
+    func promptForCustomShuffleInterval() {
+        let alert = NSAlert()
+        alert.messageText = "Custom Shuffle Interval"
+        alert.informativeText = "Enter shuffle interval in minutes (between 0.25 and 60 minutes):\nNote: 0.25 minutes is 15 seconds."
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        input.placeholderString = "e.g., 3, 5, 10"
+        
+        if shuffleInterval > 0 {
+            let currentMins = shuffleInterval / 60.0
+            input.stringValue = String(format: "%.2f", currentMins)
+        }
+        
+        alert.accessoryView = input
+        
+        if alert.runModal() == .alertFirstButtonReturn {
+            let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let mins = Double(text) {
+                let secs = mins * 60.0
+                if secs >= 15.0 && secs <= 3600.0 {
+                    setShuffleInterval(secs)
+                    updateCheckMessage = "Shuffle set to \(mins) min"
+                } else {
+                    let errAlert = NSAlert()
+                    errAlert.messageText = "Invalid Interval"
+                    errAlert.informativeText = "The shuffle interval must be between 0.25 minutes (15 seconds) and 60 minutes."
+                    errAlert.addButton(withTitle: "OK")
+                    errAlert.runModal()
+                }
+            } else {
+                let errAlert = NSAlert()
+                errAlert.messageText = "Invalid Number"
+                errAlert.informativeText = "Please enter a valid numeric value."
+                errAlert.addButton(withTitle: "OK")
+                errAlert.runModal()
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -771,6 +814,8 @@ class DraggableWindow: NSWindow {
 
     // Capture mouse down to ensure dragging works even over some SwiftUI elements
     override func mouseDown(with event: NSEvent) {
+        NSApp.activate(ignoringOtherApps: true)
+        self.makeKeyAndOrderFront(nil)
         self.performDrag(with: event)
     }
 }
@@ -791,6 +836,7 @@ class AboutWindowController {
                 styleMask: [.titled, .closable, .fullSizeContentView],
                 backing: .buffered, defer: false
             )
+            win.isReleasedWhenClosed = false
             win.center()
             win.title = "About Artistry"
             win.titlebarAppearsTransparent = true
@@ -1451,6 +1497,9 @@ struct MenuBarContentView: View {
                         Button(state.shuffleInterval == 60 ? "✓ 1 min" : "1 min") {
                             state.setShuffleInterval(60)
                         }
+                        Button(state.shuffleInterval == 180 ? "✓ 3 min" : "3 min") {
+                            state.setShuffleInterval(180)
+                        }
                         Button(state.shuffleInterval == 300 ? "✓ 5 min" : "5 min") {
                             state.setShuffleInterval(300)
                         }
@@ -1459,6 +1508,20 @@ struct MenuBarContentView: View {
                         }
                         Button(state.shuffleInterval == 1800 ? "✓ 30 min" : "30 min") {
                             state.setShuffleInterval(1800)
+                        }
+                        
+                        let isStandard = [0.0, 30.0, 60.0, 180.0, 300.0, 600.0, 1800.0].contains(state.shuffleInterval)
+                        if !isStandard && state.shuffleInterval > 0 {
+                            let mins = state.shuffleInterval / 60.0
+                            Button(String(format: "✓ Custom (%.2f min)", mins)) {
+                                state.promptForCustomShuffleInterval()
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        Button("Custom Interval...") {
+                            state.promptForCustomShuffleInterval()
                         }
                     }
 
@@ -1557,11 +1620,11 @@ struct MenuBarContentView: View {
                     HStack {
                         Text("🧠  Art Quiz Ready! Start →")
                             .font(.headline)
-                            .foregroundColor(.yellow)
+                            .foregroundColor(Color(red: 0.90, green: 0.60, blue: 0.15))
                             .frame(maxWidth: .infinity)
                     }
                     .padding(.vertical, 4)
-                    .background(Color.yellow.opacity(0.15))
+                    .background(Color(red: 0.90, green: 0.60, blue: 0.15).opacity(0.12))
                     .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
@@ -1734,21 +1797,30 @@ class QuizState: ObservableObject {
 
             switch qType {
             case .artist:
-                correct = photo.author.name
-                pool = (photos.map { $0.author.name } + fallbackArtists).filter { $0 != correct }
+                let name = photo.author.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                correct = name.isEmpty ? "Unknown Artist" : name
+                pool = (photos.map { $0.author.name.trimmingCharacters(in: .whitespacesAndNewlines) } + fallbackArtists)
+                    .filter { !$0.isEmpty && $0 != correct }
             case .title:
-                correct = photo.name
-                pool = (photos.map { $0.name } + fallbackTitles).filter { $0 != correct }
+                let title = photo.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                correct = title.isEmpty ? "Untitled" : title
+                pool = (photos.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) } + fallbackTitles)
+                    .filter { !$0.isEmpty && $0 != correct }
             case .style:
-                correct = photo.style ?? "Unknown"
-                pool = (photos.compactMap { $0.style } + fallbackStyles).filter { $0 != correct }
+                let style = photo.style?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                correct = style.isEmpty ? "Unknown" : style
+                pool = (photos.compactMap { p -> String? in
+                    let s = p.style?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return s.isEmpty ? nil : s
+                } + fallbackStyles)
+                    .filter { $0 != correct }
             }
 
             let poolArr: [String] = Array(Set(pool))
             var wrongs = poolArr.shuffled().prefix(3).map { String($0) }
             while wrongs.count < 3 { wrongs.append("Unknown") }
 
-            var opts = ([correct] + wrongs).shuffled()
+            let opts = ([correct] + wrongs).shuffled()
             let cachedURL = ArtifyCacheManager.shared.cachedWallpapers
                 .first { $0.lastPathComponent == "\(photo.id).jpg" }
 
@@ -1910,13 +1982,13 @@ struct QuizQuestionView: View {
                     Image(nsImage: img)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 280, height: 180)
+                        .frame(width: 480, height: 260)
                         .clipped()
                         .cornerRadius(12)
                 } else {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color(white: 0.15))
-                        .frame(width: 280, height: 180)
+                        .frame(width: 480, height: 260)
                         .overlay(Text("🖼").font(.system(size: 50)))
                 }
             }
@@ -2097,6 +2169,7 @@ struct QuizResultView: View {
 
     @ViewBuilder
     private func reviewCard(_ answer: QuizAnswer) -> some View {
+        let artistName = answer.question.photo.author.name
         VStack(spacing: 6) {
             if let url = answer.question.cachedImageURL, let img = NSImage(contentsOf: url) {
                 Image(nsImage: img)
@@ -2104,13 +2177,32 @@ struct QuizResultView: View {
                     .frame(width: 80, height: 60).clipped().cornerRadius(8)
             }
             Text(answer.isCorrect ? "✓" : "✗")
-                .font(.system(size: 18, weight: .black))
+                .font(.system(size: 16, weight: .black))
                 .foregroundColor(answer.isCorrect ? .green : .red)
-            Text(answer.question.correctAnswer)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundColor(Color(white: 0.75))
-                .lineLimit(2).multilineTextAlignment(.center)
-                .frame(width: 90)
+            Text(answer.question.photo.name)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .frame(width: 100)
+            Text("by \(artistName)")
+                .font(.system(size: 8))
+                .foregroundColor(Color(white: 0.7))
+                .lineLimit(1)
+                .frame(width: 100)
+            
+            Button(action: {
+                ArtifyState.shared.artistSearchQuery = artistName
+                ArtifyState.shared.fetchRandom()
+                QuizState.shared.endQuiz()
+            }) {
+                Text("Explore Artist")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.yellow)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(Capsule().stroke(Color.yellow, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10)
@@ -2194,6 +2286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
