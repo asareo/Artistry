@@ -71,8 +71,8 @@ def fetch_wikiart_paintings(artist_slug):
             return []
         
         paintings = []
-        # Limit to top 50 paintings to keep seeding lightweight
-        for p in results[:50]:
+        # Limit to top 10 paintings to keep seeding lightweight
+        for p in results[:10]:
             img_url = p.get("image")
             if not img_url:
                 continue
@@ -125,7 +125,7 @@ def fetch_met_paintings(query):
         if not object_ids: return []
         
         paintings = []
-        for obj_id in object_ids[:50]:
+        for obj_id in object_ids[:10]:
             obj_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{obj_id}"
             obj_resp = requests.get(obj_url, timeout=5)
             if obj_resp.status_code != 200: continue
