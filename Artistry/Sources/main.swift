@@ -398,7 +398,6 @@ class ArtifyState: ObservableObject {
                     // 1. Try decoding as a single photo (Feature Random)
                     if let apiResp = try? JSONDecoder().decode(APIResponse.self, from: data),
                        let photo = apiResp.data {
-                        if !self.artistSearchQuery.isEmpty { self.artistSearchQuery = "" }
                         self.processFetchResult(photo: photo)
                         return
                     }
@@ -408,7 +407,6 @@ class ArtifyState: ObservableObject {
                        let photos = searchResp.data, !photos.isEmpty {
                         // Shuffle results so we don't always show the same 'first' hit
                         let photo = photos.shuffled()[0] 
-                        if !self.artistSearchQuery.isEmpty { self.artistSearchQuery = "" }
                         self.processFetchResult(photo: photo)
                         return
                     }
@@ -1525,17 +1523,6 @@ struct MenuBarContentView: View {
                         }
                     }
 
-                    // Toggles
-                    Button(state.overlayVisible ? "🔲  Hide Info Overlay" : "🔲  Show Info Overlay") {
-                        state.toggleOverlay()
-                    }
-
-                    Button(state.forceNetworkOnly ? "🌐  Network Only: ON" : "🌐  Network Only: OFF") {
-                        state.forceNetworkOnly.toggle()
-                    }
-
-                    Divider()
-
                     // Check for updates
                     Button(state.isCheckingForUpdates ? "⏳  Checking..." : "🔄  Check for Updates...") {
                         state.checkForUpdates(manual: true)
@@ -1558,6 +1545,29 @@ struct MenuBarContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 24, height: 24)
+            }
+
+            if !state.artistSearchQuery.isEmpty {
+                Divider()
+                HStack {
+                    Text("🎨 Filtering: \(state.artistSearchQuery)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(red: 0.90, green: 0.60, blue: 0.15))
+                        .lineLimit(1)
+                    Spacer()
+                    Button(action: {
+                        state.artistSearchQuery = ""
+                        state.fetchRandom()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 6).padding(.vertical, 4)
+                .background(Color(red: 0.90, green: 0.60, blue: 0.15).opacity(0.12))
+                .cornerRadius(6)
             }
 
             Divider()
@@ -1589,6 +1599,20 @@ struct MenuBarContentView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
+            }
+
+            Divider()
+
+            // Primary Toggle for Info Overlay
+            Button(action: {
+                state.toggleOverlay()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: state.overlayVisible ? "eye.slash" : "eye")
+                    Text(state.overlayVisible ? "Hide Info Overlay" : "Show Info Overlay")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .frame(maxWidth: .infinity)
             }
 
             Divider()
@@ -1981,9 +2005,9 @@ struct QuizQuestionView: View {
                 if let url = q.cachedImageURL, let img = NSImage(contentsOf: url) {
                     Image(nsImage: img)
                         .resizable()
-                        .scaledToFill()
+                        .scaledToFit()
                         .frame(width: 480, height: 260)
-                        .clipped()
+                        .background(Color.black.opacity(0.15))
                         .cornerRadius(12)
                 } else {
                     RoundedRectangle(cornerRadius: 12)
