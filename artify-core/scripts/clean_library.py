@@ -68,7 +68,7 @@ def main():
         print(f"\nFound {len(dead_photos)} dead/broken paintings. Cleaning library...")
         try:
             # Delete broken photos from the database
-            cur.execute("DELETE FROM photos WHERE id = ANY(%s)", (dead_photos,))
+            cur.execute("DELETE FROM photos WHERE id = ANY(%s::uuid[])", (dead_photos,))
             conn.commit()
             print(f"Successfully deleted {len(dead_photos)} broken paintings from the library!")
         except Exception as e:
