@@ -242,6 +242,7 @@ class ArtifyState: ObservableObject {
     @Published var artistSearchQuery: String = ""
     @Published var discoveryQuery: String = ""
     @Published var isDiscovering = false
+    @Published var discoveryMessage: String? = nil
 
     // Ring buffer of the last 10 successfully shown photos (for quiz)
     private(set) var recentlyShownPhotos: [Photo] = []
@@ -305,6 +306,7 @@ class ArtifyState: ObservableObject {
     private var lastPhotoID: String?
     private var currentWallpaperURL: URL?
     private var fetchRetryCount = 0
+    private var hasAttemptedDiscoveryForCurrentQuery = false
     private var downloadFailCount = 0   // separate counter for image-level failures
     private let maxFetchRetries = 5    // max times to retry same-ID API response
     private let maxDownloadRetries = 8  // max image download failures before giving up
@@ -314,24 +316,104 @@ class ArtifyState: ObservableObject {
 
     func discoverArt() {
         guard !discoveryQuery.isEmpty else { return }
-        isDiscovering = true
         let query = discoveryQuery
+        isDiscovering = true
+        discoveryMessage = "Searching..."
         discoveryQuery = ""
         
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "\(apiBase)/discover?q=\(encoded)") else {
             isDiscovering = false
+            discoveryMessage = "Invalid query URL"
             return
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
-                self?.isDiscovering = false
+                guard let self = self else { return }
+                self.isDiscovering = false
+                
+                if let error = error {
+                    self.discoveryMessage = "Error: \(error.localizedDescription)"
+                    self.fetchRandom()
+                    return
+                }
+                
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    self.discoveryMessage = "Failed to discover art (Server error)"
+                    self.fetchRandom()
+                    return
+                }
+                
+                guard let data = data else {
+                    self.discoveryMessage = "No response from server"
+                    self.fetchRandom()
+                    return
+                }
+                
+                struct APIDiscoverResponse: Codable {
+                    let code: Int
+                    let message: String
+                    let data: String?
+                }
+                
+                if let discoverResp = try? JSONDecoder().decode(APIDiscoverResponse.self, from: data),
+                   let output = discoverResp.data {
+                    if output.contains("No paintings found") {
+                        self.discoveryMessage = "No images found for '\(query)'"
+                    } else if let range = output.range(of: "Success: Inserted ") {
+                        let sub = output[range.upperBound...]
+                        if let spaceIndex = sub.firstIndex(of: " ") {
+                            let countStr = sub[..<spaceIndex]
+                            if let count = Int(countStr) {
+                                if count > 0 {
+                                    self.discoveryMessage = "Added \(count) new images for '\(query)'"
+                                } else {
+                                    self.discoveryMessage = "No new images added (already in library) for '\(query)'"
+                                }
+                            } else {
+                                self.discoveryMessage = "Search complete for '\(query)'"
+                            }
+                        } else {
+                            self.discoveryMessage = "Search complete for '\(query)'"
+                        }
+                    } else {
+                        self.discoveryMessage = "Search complete for '\(query)'"
+                    }
+                } else {
+                    self.discoveryMessage = "Search complete for '\(query)'"
+                }
+                
                 // Fetch a random photo immediately to show a new result from the discovery
-                self?.fetchRandom()
+                self.fetchRandom()
+            }
+        }.resume()
+    }
+
+    func discoverArtAndRetry(for artist: String) {
+        hasAttemptedDiscoveryForCurrentQuery = true
+        isDiscovering = true
+        loadingStatus = "Discovering new art for '\(artist)'..."
+        
+        let encoded = artist.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "\(apiBase)/discover?q=\(encoded)") else {
+            isDiscovering = false
+            self.fetchRandom(isRetry: true)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isDiscovering = false
+                self.fetchRetryCount = 0
+                self.fetchRandom(isRetry: true)
             }
         }.resume()
     }
@@ -348,6 +430,7 @@ class ArtifyState: ObservableObject {
         // Reset retry counter on fresh user-initiated fetch
         if !isRetry {
             fetchRetryCount = 0
+            hasAttemptedDiscoveryForCurrentQuery = false
         }
 
         // If already loading and this isn't a retry, ignore
@@ -394,35 +477,43 @@ class ArtifyState: ObservableObject {
                     return
                 }
 
-                do {
-                    // 1. Try decoding as a single photo (Feature Random)
-                    if let apiResp = try? JSONDecoder().decode(APIResponse.self, from: data),
-                       let photo = apiResp.data {
-                        self.processFetchResult(photo: photo)
-                        return
-                    }
-                    
-                    // 2. Try decoding as an array (Search result)
-                    if let searchResp = try? JSONDecoder().decode(APISearchResponse.self, from: data),
-                       let photos = searchResp.data, !photos.isEmpty {
-                        // Shuffle results so we don't always show the same 'first' hit
-                        let photo = photos.shuffled()[0] 
-                        self.processFetchResult(photo: photo)
-                        return
-                    }
-                    
-                    // If we get here, neither worked
-                    if !self.artistSearchQuery.isEmpty {
+                // 1. Try decoding as a single photo (Feature Random)
+                if let apiResp = try? JSONDecoder().decode(APIResponse.self, from: data),
+                   let photo = apiResp.data {
+                    self.processFetchResult(photo: photo)
+                    return
+                }
+                
+                // 2. Try decoding as an array (Search result)
+                if let searchResp = try? JSONDecoder().decode(APISearchResponse.self, from: data),
+                   let photos = searchResp.data, !photos.isEmpty {
+                    // Shuffle results so we don't always show the same 'first' hit
+                    let photo = photos.shuffled()[0] 
+                    self.processFetchResult(photo: photo)
+                    return
+                }
+                
+                // If we get here, neither worked (returned empty list or decode failed)
+                if !self.artistSearchQuery.isEmpty {
+                    if !self.hasAttemptedDiscoveryForCurrentQuery {
+                        self.fetchRetryCount += 1
+                        if self.fetchRetryCount >= 3 {
+                            self.discoverArtAndRetry(for: self.artistSearchQuery)
+                        } else {
+                            self.isLoading = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                self.fetchRandom(isRetry: true)
+                            }
+                        }
+                    } else {
+                        // Already tried discovery and got nothing, fall back to random
                         self.artistSearchQuery = ""
                         self.fetchRandom()
-                        return
                     }
-                    self.lastError = "No photo found in response"
-                    self.isLoading = false
-                } catch {
-                    self.lastError = "Parse error: \(error.localizedDescription)"
-                    self.isLoading = false
+                    return
                 }
+                self.lastError = "No photo found in response"
+                self.isLoading = false
             }
         }.resume()
     }
@@ -431,6 +522,10 @@ class ArtifyState: ObservableObject {
         // 1. Same-as-last-one check (API giving us the same ID twice)
         if photo.id == self.lastPhotoID && self.fetchRetryCount < self.maxFetchRetries {
             self.fetchRetryCount += 1
+            if self.fetchRetryCount >= 3 && !self.artistSearchQuery.isEmpty && !self.hasAttemptedDiscoveryForCurrentQuery {
+                self.discoverArtAndRetry(for: self.artistSearchQuery)
+                return
+            }
             self.isLoading = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 self.fetchRandom(isRetry: true)
@@ -441,6 +536,10 @@ class ArtifyState: ObservableObject {
         // 2. Recent history check (Don't show the same image within the last 10)
         if recentlyShownPhotos.contains(where: { $0.id == photo.id }) && self.fetchRetryCount < self.maxFetchRetries {
             self.fetchRetryCount += 1
+            if self.fetchRetryCount >= 3 && !self.artistSearchQuery.isEmpty && !self.hasAttemptedDiscoveryForCurrentQuery {
+                self.discoverArtAndRetry(for: self.artistSearchQuery)
+                return
+            }
             self.isLoading = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.fetchRandom(isRetry: true)
@@ -1632,6 +1731,13 @@ struct MenuBarContentView: View {
                     .onSubmit {
                         state.discoverArt()
                     }
+                
+                if let msg = state.discoveryMessage {
+                    Text(msg)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(msg.contains("Error") || msg.contains("No images found") || msg.contains("Failed") ? .orange : .green)
+                        .padding(.top, 2)
+                }
             }
 
             // Quiz ready banner — launches the Kahoot-style art quiz
