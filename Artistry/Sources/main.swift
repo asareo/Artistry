@@ -248,15 +248,38 @@ class ArtifyState: ObservableObject {
     private(set) var recentlyShownPhotos: [Photo] = []
     private var photosUntilQuiz: Int = Int.random(in: 5...8)
     @Published var consecutiveCachedShown: Int = 0 // Tracks how many cached images shown in a row
-    @Published var forceNetworkOnly = true // Default to fresh network downloads
+    @Published var forceNetworkOnly = false // Default to false for graceful fallback
+    @Published var differentArtPerDisplay = false
 
     private init() {
         // Load favorites from UserDefaults
         if let saved = UserDefaults.standard.stringArray(forKey: "ArtifyFavoriteIDs") {
             favoritedIDs = Set(saved)
         }
+        // Load settings from UserDefaults
+        self.differentArtPerDisplay = UserDefaults.standard.bool(forKey: "ArtifyDifferentArtPerDisplay")
+        if UserDefaults.standard.object(forKey: "ArtifyForceNetworkOnly") != nil {
+            self.forceNetworkOnly = UserDefaults.standard.bool(forKey: "ArtifyForceNetworkOnly")
+        } else {
+            self.forceNetworkOnly = false
+        }
         // Initialize default shuffle interval to 3 minutes
         setShuffleInterval(180)
+
+        // Detect local backend running in Docker
+        if let localURL = URL(string: "http://localhost:7300/") {
+            var request = URLRequest(url: localURL)
+            request.timeoutInterval = 1.0  // fast check
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    DispatchQueue.main.async {
+                        self?.apiBase = "http://localhost:7300/api"
+                        print("Local Docker backend detected! Switching API base to http://localhost:7300/api")
+                        self?.fetchRandom()
+                    }
+                }
+            }.resume()
+        }
     }
 
     // ── Favorites persistence ──────────────────────────────────────────
@@ -312,7 +335,7 @@ class ArtifyState: ObservableObject {
     private let maxDownloadRetries = 8  // max image download failures before giving up
     private let downloadTimeoutSeconds: TimeInterval = 20  // generous for large art images
 
-    let apiBase = "https://artistry-wsnw.onrender.com/api"
+    @Published var apiBase = "https://artistry-wsnw.onrender.com/api"
 
     func discoverArt() {
         guard !discoveryQuery.isEmpty else { return }
@@ -391,6 +414,28 @@ class ArtifyState: ObservableObject {
                 self.fetchRandom()
             }
         }.resume()
+    }
+
+    func promptForDiscovery() {
+        let alert = NSAlert()
+        alert.messageText = "Import New Masterpieces"
+        alert.informativeText = "Enter a keyword, style, or artist name (e.g., 'Surrealism', 'Monet', 'Da Vinci') to search, download, and add new art pieces directly to the library:"
+        alert.addButton(withTitle: "Search & Import")
+        alert.addButton(withTitle: "Cancel")
+        
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        input.placeholderString = "e.g., Surrealism, Claude Monet"
+        alert.accessoryView = input
+        
+        NSApp.activate(ignoringOtherApps: true)
+        
+        if alert.runModal() == .alertFirstButtonReturn {
+            let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                self.discoveryQuery = text
+                self.discoverArt()
+            }
+        }
     }
 
     func discoverArtAndRetry(for artist: String) {
@@ -534,7 +579,8 @@ class ArtifyState: ObservableObject {
         }
 
         // 2. Recent history check (Don't show the same image within the last 10)
-        if recentlyShownPhotos.contains(where: { $0.id == photo.id }) && self.fetchRetryCount < self.maxFetchRetries {
+        // Skip this check if we are filtering, as the search pool might be very small.
+        if artistSearchQuery.isEmpty && recentlyShownPhotos.contains(where: { $0.id == photo.id }) && self.fetchRetryCount < self.maxFetchRetries {
             self.fetchRetryCount += 1
             if self.fetchRetryCount >= 3 && !self.artistSearchQuery.isEmpty && !self.hasAttemptedDiscoveryForCurrentQuery {
                 self.discoverArtAndRetry(for: self.artistSearchQuery)
@@ -674,30 +720,43 @@ class ArtifyState: ObservableObject {
         }
     }
 
+    func reapplyWallpapers() {
+        if let current = currentWallpaperURL {
+            applyWallpaper(localURL: current)
+        }
+    }
+
     private func applyWallpaper(localURL: URL) {
         currentWallpaperURL = localURL
 
-        // Dynamic Scaling: Choose between Fill (crop) and Fit (show all)
-        // based on how well the image aspect ratio matches the screen.
-        let image = NSImage(contentsOf: localURL)
-        let imageSize = image?.size ?? .zero
-
-        for screen in NSScreen.screens {
+        let screens = NSScreen.screens
+        for (index, screen) in screens.enumerated() {
+            let url: URL
+            if index == 0 || !differentArtPerDisplay {
+                url = localURL
+            } else {
+                if let randomFallback = ArtifyCacheManager.shared.randomCached(excluding: localURL) {
+                    url = randomFallback
+                } else {
+                    url = localURL
+                }
+            }
+            
+            let image = NSImage(contentsOf: url)
+            let imageSize = image?.size ?? .zero
             let screenRatio = screen.frame.width / screen.frame.height
             let imageRatio = imageSize.width > 0 ? (imageSize.width / imageSize.height) : screenRatio
             
-            // If aspect ratios differ by more than 15%, use 'Fit' (allowClipping: false)
-            // so we don't crop off important parts of wide/tall masterpieces.
             let ratioDiff = abs(screenRatio - imageRatio) / screenRatio
             let shouldFit = ratioDiff > 0.15
 
             let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                .allowClipping: NSNumber(value: !shouldFit) // false = Fit (show all), true = Fill (crop)
+                .allowClipping: NSNumber(value: !shouldFit)
             ]
             
             do {
-                try NSWorkspace.shared.setDesktopImageURL(localURL, for: screen, options: options)
+                try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: options)
             } catch {
                 self.lastError = "Wallpaper error: \(error.localizedDescription)"
             }
@@ -1583,6 +1642,20 @@ struct MenuBarContentView: View {
                 
                 // Unified Settings menu (gear icon)
                 Menu {
+                    // Preferences Submenu
+                    Menu("⚙️  Preferences") {
+                        Button(state.differentArtPerDisplay ? "✓ Different Art per Display" : "Different Art per Display") {
+                            state.differentArtPerDisplay.toggle()
+                            UserDefaults.standard.set(state.differentArtPerDisplay, forKey: "ArtifyDifferentArtPerDisplay")
+                            state.reapplyWallpapers()
+                        }
+                        
+                        Button(state.forceNetworkOnly ? "✓ Force Fresh Downloads" : "Force Fresh Downloads") {
+                            state.forceNetworkOnly.toggle()
+                            UserDefaults.standard.set(state.forceNetworkOnly, forKey: "ArtifyForceNetworkOnly")
+                        }
+                    }
+
                     // Shuffle interval sub-menu
                     Menu("⏱  Shuffle Interval") {
                         Button(state.shuffleInterval == 0 ? "✓ Off" : "Off") {
@@ -1622,14 +1695,16 @@ struct MenuBarContentView: View {
                         }
                     }
 
-                    // Check for updates
-                    Button(state.isCheckingForUpdates ? "⏳  Checking..." : "🔄  Check for Updates...") {
-                        state.checkForUpdates(manual: true)
-                    }
-                    .disabled(state.isCheckingForUpdates)
+                    // Help & System Submenu
+                    Menu("ℹ️  Help & System") {
+                        Button(state.isCheckingForUpdates ? "⏳  Checking..." : "🔄  Check for Updates...") {
+                            state.checkForUpdates(manual: true)
+                        }
+                        .disabled(state.isCheckingForUpdates)
 
-                    Button("ℹ️  About Artify") {
-                        AboutWindowController.shared.show()
+                        Button("About Artify") {
+                            AboutWindowController.shared.show()
+                        }
                     }
 
                     Divider()
@@ -1829,11 +1904,15 @@ class QuizState: ObservableObject {
     private var timer: Timer?
     private let questionTime: Double = 15
 
+    @Published var score = 0
+    @Published var streak = 0
+    @Published var streakBonusMsg: String? = nil
+
     var currentQ: QuizQuestion? {
         guard qIndex < questions.count else { return nil }
         return questions[qIndex]
     }
-    var score: Int { answers.filter(\.isCorrect).count }
+    var correctCount: Int { answers.filter(\.isCorrect).count }
 
     // MARK: - Start / Flow
 
@@ -1846,6 +1925,9 @@ class QuizState: ObservableObject {
         showHint     = false
         quizComplete = false
         isActive     = true
+        score        = 0
+        streak       = 0
+        streakBonusMsg = nil
         loadPortraitsForCurrentQ()
         startTimer()
     }
@@ -1854,6 +1936,22 @@ class QuizState: ObservableObject {
         guard chosen == nil, let q = currentQ else { return }
         chosen = answer
         timer?.invalidate()
+        let isCorrect = answer == q.correctAnswer
+        if isCorrect {
+            streak += 1
+            let points = 100 + Int(timeRemaining * 20.0) + (streak * 50)
+            score += points
+            if streak > 1 {
+                streakBonusMsg = "🔥 +\(points) (Streak x\(streak)!)"
+            } else {
+                streakBonusMsg = "✨ +\(points)"
+            }
+            NSSound(named: "Glass")?.play()
+        } else {
+            streak = 0
+            streakBonusMsg = "❌ Incorrect (Streak lost!)"
+            NSSound(named: "Basso")?.play()
+        }
         answers.append(QuizAnswer(question: q, chosen: answer))
         showResult = true
         advance(after: 1.8)
@@ -1876,6 +1974,7 @@ class QuizState: ObservableObject {
             self.showResult = false
             self.showHint   = false
             self.chosen     = nil
+            self.streakBonusMsg = nil
             if self.qIndex + 1 >= self.questions.count {
                 self.quizComplete = true
             } else {
@@ -1895,7 +1994,9 @@ class QuizState: ObservableObject {
             if self.timeRemaining <= 0 {
                 self.timeRemaining = 0
                 self.timer?.invalidate()
-                // Timed out — record empty answer
+                self.streak = 0
+                self.streakBonusMsg = "⏰ Out of time!"
+                NSSound(named: "Basso")?.play()
                 if let q = self.currentQ {
                     self.answers.append(QuizAnswer(question: q, chosen: ""))
                 }
@@ -1916,12 +2017,17 @@ class QuizState: ObservableObject {
     // MARK: - Question Builder
 
     private func buildQuestions(from photos: [Photo]) -> [QuizQuestion] {
-        // Assign question types round-robin, then shuffle order
         let types: [QuestionType] = [.artist, .title, .style, .artist, .title]
         var questions: [QuizQuestion] = []
 
         for (i, photo) in photos.enumerated() {
-            let qType = types[i % types.count]
+            var qType = types[i % types.count]
+            if qType == .style {
+                let style = photo.style?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if style.isEmpty {
+                    qType = (i % 2 == 0) ? .artist : .title
+                }
+            }
             let correct: String
             var pool: [String]
 
@@ -2125,12 +2231,27 @@ struct QuizQuestionView: View {
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
             .padding(.top, 16)
 
+            // Streak/Bonus points display
+            if let bonus = quiz.streakBonusMsg {
+                Text(bonus)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(bonus.contains("❌") || bonus.contains("⏰") ? .orange : .green)
+                    .padding(.top, 8)
+            } else if quiz.streak > 0 {
+                Text("🔥 \(quiz.streak) Answer Streak!")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .padding(.top, 8)
+            } else {
+                Spacer().frame(height: 14)
+            }
+
             // Question text
             Text(q.type.prompt)
                 .font(.system(size: 22, weight: .bold, design: .serif))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
-                .padding(.top, 12)
+                .padding(.top, 4)
                 .padding(.horizontal, 40)
 
             // Hint button (artist questions only)
@@ -2250,7 +2371,7 @@ struct QuizResultView: View {
     @ObservedObject var quiz = QuizState.shared
 
     private var tier: (emoji: String, label: String) {
-        switch quiz.score {
+        switch quiz.correctCount {
         case 5:      return ("🏆", "Maestro!")
         case 4:      return ("🥇", "Connoisseur!")
         case 3:      return ("🥈", "Scholar")
@@ -2266,14 +2387,19 @@ struct QuizResultView: View {
                 .foregroundColor(.white)
 
             Text(tier.emoji)
-                .font(.system(size: 64))
+                .font(.system(size: 54))
 
-            Text("\(quiz.score) / \(quiz.questions.count)")
-                .font(.system(size: 48, weight: .black))
-                .foregroundColor(.yellow)
+            VStack(spacing: 2) {
+                Text("\(quiz.score) Points")
+                    .font(.system(size: 38, weight: .black))
+                    .foregroundColor(.yellow)
+                Text("\(quiz.correctCount) / \(quiz.questions.count) Correct")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(.green.opacity(0.9))
+            }
 
             Text(tier.label)
-                .font(.system(size: 20, weight: .semibold, design: .serif))
+                .font(.system(size: 18, weight: .semibold, design: .serif))
                 .foregroundColor(Color(white: 0.85))
                 .italic()
 
