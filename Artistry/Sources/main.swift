@@ -222,7 +222,7 @@ class ArtistPortraitCache {
 
 class ArtifyState: ObservableObject {
     static let shared = ArtifyState()
-    static let currentVersion = "3.2"
+    static let currentVersion = "3.3"
 
     @Published var updateAvailable = false
     @Published var updateNotes = ""
@@ -258,13 +258,26 @@ class ArtifyState: ObservableObject {
         }
         // Load settings from UserDefaults
         self.differentArtPerDisplay = UserDefaults.standard.bool(forKey: "ArtifyDifferentArtPerDisplay")
-        if UserDefaults.standard.object(forKey: "ArtifyForceNetworkOnly") != nil {
-            self.forceNetworkOnly = UserDefaults.standard.bool(forKey: "ArtifyForceNetworkOnly")
-        } else {
-            self.forceNetworkOnly = false
-        }
+        // Always default to false on startup for smooth experience, ignoring stored true values to avoid errors
+        self.forceNetworkOnly = false
+        
         // Initialize default shuffle interval to 3 minutes
         setShuffleInterval(180)
+
+        // INSTANT STARTUP: load last active masterpiece and wallpaper immediately
+        if let data = UserDefaults.standard.data(forKey: "ArtifyLastActivePhoto"),
+           let photo = try? JSONDecoder().decode(Photo.self, from: data) {
+            self.currentPhoto = photo
+            let cachedFile = ArtifyCacheManager.shared.cachedWallpapers
+                .first { $0.lastPathComponent == "\(photo.id).jpg" }
+            if let cached = cachedFile {
+                self.currentWallpaperURL = cached
+                self.applyWallpaper(localURL: cached)
+            }
+        } else if let initialCached = ArtifyCacheManager.shared.randomCached() {
+            self.currentWallpaperURL = initialCached
+            self.applyWallpaper(localURL: initialCached)
+        }
 
         // Detect local backend running in Docker
         if let localURL = URL(string: "http://localhost:7300/") {
@@ -764,6 +777,9 @@ class ArtifyState: ObservableObject {
 
         // Track this photo in the quiz-history ring buffer
         if let photo = currentPhoto {
+            if let data = try? JSONEncoder().encode(photo) {
+                UserDefaults.standard.set(data, forKey: "ArtifyLastActivePhoto")
+            }
             if !recentlyShownPhotos.contains(photo) {
                 recentlyShownPhotos.append(photo)
                 if recentlyShownPhotos.count > 10 { recentlyShownPhotos.removeFirst() }
