@@ -9,18 +9,23 @@ import SwiftUI
 // ─────────────────────────────────────────────
 
 struct Author: Codable {
-    let id: String
-    let name: String
+    let id: String?
+    let name: String?
     let born: String?
     let died: String?
     let nationality: String?
+
+    var displayName: String {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Unknown Artist" : trimmed
+    }
 }
 
 struct Photo: Codable, Equatable {
     let id: String
     let name: String
     let image_url: String
-    let author: Author
+    let author: Author?
     let info: String?
     let date: String?
     let style: String?
@@ -28,6 +33,10 @@ struct Photo: Codable, Equatable {
     let dimensions: String?
     let media: String?
     let is_favorite: Bool?
+
+    var authorDisplayName: String {
+        author?.displayName ?? "Unknown Artist"
+    }
 
     static func == (lhs: Photo, rhs: Photo) -> Bool {
         lhs.id == rhs.id
@@ -113,7 +122,10 @@ class ArtifyCacheManager {
 
     private func evictOldest() {
         guard let oldest = cachedWallpapers.first else { return }
+        let photoID = oldest.deletingPathExtension().lastPathComponent
+        let metaURL = cacheDir.appendingPathComponent("\(photoID).json")
         try? FileManager.default.removeItem(at: oldest)
+        try? FileManager.default.removeItem(at: metaURL)
         cachedWallpapers.removeFirst()
     }
 
@@ -122,6 +134,24 @@ class ArtifyCacheManager {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
             return sum + size
         }
+    }
+
+    /// Saves photo metadata to disk as JSON
+    func savePhotoMetadata(_ photo: Photo) {
+        let metaURL = cacheDir.appendingPathComponent("\(photo.id).json")
+        if let data = try? JSONEncoder().encode(photo) {
+            try? data.write(to: metaURL)
+        }
+    }
+
+    /// Loads photo metadata from disk if available
+    func loadPhotoMetadata(photoID: String) -> Photo? {
+        let metaURL = cacheDir.appendingPathComponent("\(photoID).json")
+        guard let data = try? Data(contentsOf: metaURL),
+              let photo = try? JSONDecoder().decode(Photo.self, from: data) else {
+            return nil
+        }
+        return photo
     }
 
     /// Returns a random cached wallpaper, preferring not the currently displayed one
@@ -308,6 +338,7 @@ class ArtifyState: ObservableObject {
         } else {
             favoritedIDs.insert(photo.id)
             saveFavoriteData(photo)
+            ArtifyCacheManager.shared.savePhotoMetadata(photo)
         }
         UserDefaults.standard.set(Array(favoritedIDs), forKey: "ArtifyFavoriteIDs")
     }
@@ -316,9 +347,11 @@ class ArtifyState: ObservableObject {
     func loadFavoritePhotos() -> [Photo] {
         favoritedIDs.compactMap { id -> Photo? in
             let key = "ArtifyFav_\(id)"
-            guard let data = UserDefaults.standard.data(forKey: key),
-                  let photo = try? JSONDecoder().decode(Photo.self, from: data) else { return nil }
-            return photo
+            if let data = UserDefaults.standard.data(forKey: key),
+               let photo = try? JSONDecoder().decode(Photo.self, from: data) {
+                return photo
+            }
+            return ArtifyCacheManager.shared.loadPhotoMetadata(photoID: id)
         }.sorted { $0.name < $1.name }
     }
 
@@ -423,33 +456,15 @@ class ArtifyState: ObservableObject {
                     self.discoveryMessage = "Search complete for '\(query)'"
                 }
                 
+                // Automatically set active search filter so subsequent wallpaper shuffles highlight this artist
+                self.artistSearchQuery = query
                 // Fetch a random photo immediately to show a new result from the discovery
                 self.fetchRandom()
             }
         }.resume()
     }
 
-    func promptForDiscovery() {
-        let alert = NSAlert()
-        alert.messageText = "Import New Masterpieces"
-        alert.informativeText = "Enter a keyword, style, or artist name (e.g., 'Surrealism', 'Monet', 'Da Vinci') to search, download, and add new art pieces directly to the library:"
-        alert.addButton(withTitle: "Search & Import")
-        alert.addButton(withTitle: "Cancel")
-        
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        input.placeholderString = "e.g., Surrealism, Claude Monet"
-        alert.accessoryView = input
-        
-        NSApp.activate(ignoringOtherApps: true)
-        
-        if alert.runModal() == .alertFirstButtonReturn {
-            let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                self.discoveryQuery = text
-                self.discoverArt()
-            }
-        }
-    }
+
 
     func discoverArtAndRetry(for artist: String) {
         hasAttemptedDiscoveryForCurrentQuery = true
@@ -570,8 +585,9 @@ class ArtifyState: ObservableObject {
                     }
                     return
                 }
-                self.lastError = "No photo found in response"
+                self.lastError = "Unable to fetch new masterpiece — displaying cached art"
                 self.isLoading = false
+                self.applyFallbackIfAvailable()
             }
         }.resume()
     }
@@ -607,8 +623,10 @@ class ArtifyState: ObservableObject {
         }
 
         self.fetchRetryCount = 0
+        self.lastError = nil
         self.lastPhotoID = photo.id
         self.currentPhoto = photo
+        ArtifyCacheManager.shared.savePhotoMetadata(photo)
         self.setWallpaper(from: photo.image_url, photoID: photo.id)
     }
 
@@ -702,7 +720,16 @@ class ArtifyState: ObservableObject {
             lastError = "No cached art available"
             return
         }
+        
+        let photoID = fallback.deletingPathExtension().lastPathComponent
+        if let cachedPhoto = ArtifyCacheManager.shared.loadPhotoMetadata(photoID: photoID) {
+            self.currentPhoto = cachedPhoto
+        } else if let historyPhoto = recentlyShownPhotos.first(where: { $0.id == photoID }) {
+            self.currentPhoto = historyPhoto
+        }
+
         applyWallpaper(localURL: fallback)
+        lastError = nil
     }
 
     // Called when an image download fails (403, 404, timeout, etc.)
@@ -785,7 +812,7 @@ class ArtifyState: ObservableObject {
                 if recentlyShownPhotos.count > 10 { recentlyShownPhotos.removeFirst() }
             }
             // Pre-fetch artist portrait in background so it's ready during quiz
-            ArtistPortraitCache.shared.fetchIfNeeded(for: photo.author.name) { _ in }
+            ArtistPortraitCache.shared.fetchIfNeeded(for: photo.authorDisplayName) { _ in }
 
             // Tick quiz countdown
             photosUntilQuiz -= 1
@@ -872,6 +899,13 @@ class ArtifyState: ObservableObject {
                     return
                 }
                 
+                struct SquirrelResponse: Codable {
+                    let url: String
+                    let name: String
+                    let notes: String?
+                    let pub_date: String?
+                }
+                
                 struct UpdateResponse: Codable {
                     struct UpdateData: Codable {
                         let build_version: String
@@ -883,9 +917,46 @@ class ArtifyState: ObservableObject {
                     let data: UpdateData?
                 }
                 
-                do {
-                    let decoder = JSONDecoder()
-                    let resp = try decoder.decode(UpdateResponse.self, from: data)
+                let decoder = JSONDecoder()
+
+                // 1. Try decoding flat SquirrelResponse returned by Go backend
+                if let squirrel = try? decoder.decode(SquirrelResponse.self, from: data) {
+                    var buildVer = Self.currentVersion
+                    if let range = squirrel.name.range(of: "Artify ") {
+                        let sub = squirrel.name[range.upperBound...]
+                        buildVer = sub.components(separatedBy: "(").first?.trimmingCharacters(in: .whitespaces) ?? Self.currentVersion
+                    }
+                    let notes = squirrel.notes ?? "No release notes provided."
+                    
+                    if buildVer != Self.currentVersion {
+                        self.updateAvailable = true
+                        self.updateNotes = notes
+                        self.updateURL = squirrel.url
+                        self.updateVersion = buildVer
+                        if manual {
+                            self.updateCheckMessage = "New version \(buildVer) is available!"
+                        }
+                        
+                        let alert = NSAlert()
+                        alert.messageText = "Update Available"
+                        alert.informativeText = "A new version of Artify (v\(buildVer)) is available.\n\nRelease Notes:\n\(notes)"
+                        alert.addButton(withTitle: "Download Now")
+                        alert.addButton(withTitle: "Later")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            if let updateURL = URL(string: squirrel.url) {
+                                NSWorkspace.shared.open(updateURL)
+                            }
+                        }
+                    } else {
+                        if manual {
+                            self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
+                        }
+                    }
+                    return
+                }
+
+                // 2. Try decoding standard API envelope response
+                if let resp = try? decoder.decode(UpdateResponse.self, from: data) {
                     if let update = resp.data {
                         self.updateAvailable = true
                         self.updateNotes = update.notes ?? ""
@@ -910,10 +981,11 @@ class ArtifyState: ObservableObject {
                             self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
                         }
                     }
-                } catch {
-                    if manual {
-                        self.updateCheckMessage = "Failed to parse update info"
-                    }
+                    return
+                }
+
+                if manual {
+                    self.updateCheckMessage = "Failed to parse update info"
                 }
             }
         }.resume()
@@ -1228,7 +1300,7 @@ struct GalleryItem: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     HStack(spacing: 4) {
-                        Text(photo.author.name)
+                        Text(photo.authorDisplayName)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.secondary)
                         if let date = photo.date, !date.isEmpty {
@@ -1297,7 +1369,7 @@ struct GalleryItem: View {
                     Text(photo.name)
                         .font(.system(size: 13, weight: .semibold, design: .serif))
                         .lineLimit(1)
-                    Text(photo.author.name)
+                    Text(photo.authorDisplayName)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -1338,7 +1410,7 @@ struct GalleryItem: View {
 }
 
 /// A stability-focused image view that loads downsampled thumbnails
-/// to prevent crashes when displaying many high-resolution masterpieces.
+/// safely to prevent crashes when displaying many high-resolution masterpieces.
 struct ThumbnailImage: View {
     let url: URL
     @State private var image: NSImage?
@@ -1350,29 +1422,23 @@ struct ThumbnailImage: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                Color.secondary.opacity(0.1)
+                Color.secondary.opacity(0.15)
+                    .overlay(
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    )
                     .onAppear { loadThumbnail() }
             }
         }
     }
 
     private func loadThumbnail() {
+        let fileURL = url
         DispatchQueue.global(qos: .userInitiated).async {
-            let options = [kCGImageSourceShouldCache: false] as CFDictionary
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return }
-            
-            // Create a 500px thumbnail (large enough for gallery cards but small in memory)
-            let downsampleOptions = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 500
-            ] as CFDictionary
-            
-            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions) {
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 250, height: 250))
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+            if let loaded = NSImage(contentsOf: fileURL) {
                 DispatchQueue.main.async {
-                    self.image = nsImage
+                    self.image = loaded
                 }
             }
         }
@@ -1401,11 +1467,14 @@ class OverlayWindowController {
     }
 
     func update() {
-        // OverlayView uses @ObservedObject on ArtifyState.shared,
-        // so it auto-updates when currentPhoto changes.
-        // We intentionally do NOT replace rootView here —
-        // doing so resets NSHostingView's internal event state
-        // and breaks DraggableWindow's drag tracking.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.window?.contentView?.needsDisplay = true
+            self.window?.invalidateShadow()
+            if ArtifyState.shared.overlayVisible {
+                self.show()
+            }
+        }
     }
 
     private func createWindow() {
@@ -1434,9 +1503,8 @@ class OverlayWindowController {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = true
-        // Desktop level: above wallpaper, below all app windows
-        w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)))
-        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        w.level = .floating
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         w.ignoresMouseEvents = false  // DraggableWindow handles drag via sendEvent
 
         let overlayView = OverlayView()
@@ -1474,7 +1542,7 @@ struct OverlayView: View {
                         
                         // Artist + date
                         HStack(spacing: 6) {
-                            Text(photo.author.name)
+                            Text(photo.authorDisplayName)
                                 .font(.system(size: 13, weight: .semibold, design: .serif))
                                 .foregroundColor(Color(white: 0.85))
                             if let date = photo.date, !date.isEmpty {
@@ -1578,7 +1646,7 @@ struct OverlayView: View {
         }
         // Fallback: synthesize from available metadata
         var parts: [String] = []
-        parts.append("\(photo.author.name) — \(photo.name).")
+        parts.append("\(photo.authorDisplayName) — \(photo.name).")
         if let style = photo.style, !style.isEmpty { parts.append("A work of \(style).") }
         if let loc = photo.location, !loc.isEmpty { parts.append("Held at \(loc).") }
         return parts.joined(separator: " ")
@@ -1642,7 +1710,7 @@ struct MenuBarContentView: View {
                         Text(photo.name)
                             .font(.headline)
                             .lineLimit(1)
-                        Text("by \(photo.author.name)")
+                        Text("by \(photo.authorDisplayName)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -1765,6 +1833,7 @@ struct MenuBarContentView: View {
             // Primary actions row (Randomize + Gallery)
             HStack(spacing: 8) {
                 Button(action: {
+                    state.lastError = nil
                     state.fetchRandom()
                 }) {
                     HStack {
@@ -1772,7 +1841,7 @@ struct MenuBarContentView: View {
                             ProgressView().scaleEffect(0.5).frame(width: 14, height: 14)
                             Text("Loading…")
                         } else {
-                            Text("🎲  Random")
+                            Text(state.artistSearchQuery.isEmpty ? "🎲  Random" : "🎲  Random (\(state.artistSearchQuery))")
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -2006,6 +2075,7 @@ class QuizState: ObservableObject {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            guard self.chosen == nil, !self.showResult else { return }
             self.timeRemaining -= 0.05
             if self.timeRemaining <= 0 {
                 self.timeRemaining = 0
@@ -2025,7 +2095,7 @@ class QuizState: ObservableObject {
     private func loadPortraitsForCurrentQ() {
         portraitURLs = []
         guard let q = currentQ, q.type == .artist else { return }
-        ArtistPortraitCache.shared.fetchIfNeeded(for: q.photo.author.name) { [weak self] urls in
+        ArtistPortraitCache.shared.fetchIfNeeded(for: q.photo.authorDisplayName) { [weak self] urls in
             self?.portraitURLs = urls
         }
     }
@@ -2049,9 +2119,9 @@ class QuizState: ObservableObject {
 
             switch qType {
             case .artist:
-                let name = photo.author.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = photo.authorDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
                 correct = name.isEmpty ? "Unknown Artist" : name
-                pool = (photos.map { $0.author.name.trimmingCharacters(in: .whitespacesAndNewlines) } + fallbackArtists)
+                pool = (photos.map { $0.authorDisplayName.trimmingCharacters(in: .whitespacesAndNewlines) } + fallbackArtists)
                     .filter { !$0.isEmpty && $0 != correct }
             case .title:
                 let title = photo.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2441,7 +2511,7 @@ struct QuizResultView: View {
 
     @ViewBuilder
     private func reviewCard(_ answer: QuizAnswer) -> some View {
-        let artistName = answer.question.photo.author.name
+        let artistName = answer.question.photo.authorDisplayName
         VStack(spacing: 6) {
             if let url = answer.question.cachedImageURL, let img = NSImage(contentsOf: url) {
                 Image(nsImage: img)

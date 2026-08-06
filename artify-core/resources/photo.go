@@ -111,15 +111,18 @@ func (r *Resource) SearchPhotos(query string, style string, nationality string) 
 	c := r.PostgreSQL.Eager("Author")
 	q := c.Where("1=1")
 
+	if query != "" || nationality != "" {
+		q = q.Join("authors a", "a.id = photos.author_id")
+	}
+
 	if query != "" {
-		q = q.Join("authors a", "a.id = photos.author_id").
-			Where("photos.name ILIKE ? OR a.name ILIKE ?", "%"+query+"%", "%"+query+"%")
+		q = q.Where("(photos.name ILIKE ? OR a.name ILIKE ?)", "%"+query+"%", "%"+query+"%")
 	}
 	if style != "" {
 		q = q.Where("photos.style ILIKE ?", "%"+style+"%")
 	}
 	if nationality != "" {
-		q = q.Join("authors a", "a.id = photos.author_id").Where("a.nationality ILIKE ?", "%"+nationality+"%")
+		q = q.Where("a.nationality ILIKE ?", "%"+nationality+"%")
 	}
 
 	err := q.All(&photos)

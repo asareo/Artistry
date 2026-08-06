@@ -26,3 +26,8 @@ __pycache__/
 # Project specific
 /tmp/ArtifyV2_*
 *.log
+.antigravityignore
+GEMINI.md
+query_output.json
+tmp/
+
