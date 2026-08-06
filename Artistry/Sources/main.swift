@@ -861,12 +861,17 @@ class ArtifyState: ObservableObject {
         isCheckingForUpdates = true
         updateCheckMessage = manual ? "Checking for updates..." : nil
         
-        guard let url = URL(string: "\(apiBase)/version/update?build_version=\(Self.currentVersion)") else {
+        let githubURL = "https://api.github.com/repos/asareo/Artistry/releases/latest"
+        guard let url = URL(string: githubURL) else {
             isCheckingForUpdates = false
             return
         }
         
-        session.dataTask(with: url) { [weak self] data, response, error in
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.setValue("Artistry-App", forHTTPHeaderField: "User-Agent")
+        
+        session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.isCheckingForUpdates = false
@@ -878,117 +883,140 @@ class ArtifyState: ObservableObject {
                     return
                 }
                 
-                guard let httpResponse = response as? HTTPURLResponse else {
+                guard let data = data else {
                     if manual {
-                        self.updateCheckMessage = "Invalid response from server"
+                        self.updateCheckMessage = "No update data received"
                     }
                     return
                 }
                 
-                if httpResponse.statusCode == 204 {
+                struct GitHubReleaseAsset: Codable {
+                    let name: String
+                    let browser_download_url: String
+                }
+                struct GitHubRelease: Codable {
+                    let tag_name: String
+                    let html_url: String
+                    let body: String?
+                    let assets: [GitHubReleaseAsset]?
+                }
+                
+                guard let release = try? JSONDecoder().decode(GitHubRelease.self, from: data) else {
+                    if manual {
+                        self.updateCheckMessage = "Failed to parse update info"
+                    }
+                    return
+                }
+                
+                let rawTag = release.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+                let notes = release.body ?? "No release notes provided."
+                let downloadURLString = release.assets?.first(where: { $0.name.lowercased().contains("artistry") || $0.name.lowercased().hasSuffix(".zip") })?.browser_download_url ?? release.html_url
+                
+                let isNewer = rawTag.compare(Self.currentVersion, options: .numeric) == .orderedDescending
+                
+                if isNewer {
+                    self.updateAvailable = true
+                    self.updateNotes = notes
+                    self.updateURL = downloadURLString
+                    self.updateVersion = rawTag
+                    if manual {
+                        self.updateCheckMessage = "New version v\(rawTag) is available!"
+                    }
+                    
+                    let alert = NSAlert()
+                    alert.messageText = "Update Available"
+                    alert.informativeText = "A new version of Artify (v\(rawTag)) is available.\n\nRelease Notes:\n\(notes)"
+                    alert.addButton(withTitle: "Update & Restart Now")
+                    alert.addButton(withTitle: "Later")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        self.downloadAndInstallUpdate(downloadURLString: downloadURLString, targetVersion: rawTag)
+                    }
+                } else {
                     if manual {
                         self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
                     }
-                    return
-                }
-                
-                guard let data = data else {
-                    if manual {
-                        self.updateCheckMessage = "Empty update response"
-                    }
-                    return
-                }
-                
-                struct SquirrelResponse: Codable {
-                    let url: String
-                    let name: String
-                    let notes: String?
-                    let pub_date: String?
-                }
-                
-                struct UpdateResponse: Codable {
-                    struct UpdateData: Codable {
-                        let build_version: String
-                        let url: String
-                        let notes: String?
-                    }
-                    let code: Int
-                    let message: String
-                    let data: UpdateData?
-                }
-                
-                let decoder = JSONDecoder()
-
-                // 1. Try decoding flat SquirrelResponse returned by Go backend
-                if let squirrel = try? decoder.decode(SquirrelResponse.self, from: data) {
-                    var buildVer = Self.currentVersion
-                    if let range = squirrel.name.range(of: "Artify ") {
-                        let sub = squirrel.name[range.upperBound...]
-                        buildVer = sub.components(separatedBy: "(").first?.trimmingCharacters(in: .whitespaces) ?? Self.currentVersion
-                    }
-                    let notes = squirrel.notes ?? "No release notes provided."
-                    
-                    if buildVer != Self.currentVersion {
-                        self.updateAvailable = true
-                        self.updateNotes = notes
-                        self.updateURL = squirrel.url
-                        self.updateVersion = buildVer
-                        if manual {
-                            self.updateCheckMessage = "New version \(buildVer) is available!"
-                        }
-                        
-                        let alert = NSAlert()
-                        alert.messageText = "Update Available"
-                        alert.informativeText = "A new version of Artify (v\(buildVer)) is available.\n\nRelease Notes:\n\(notes)"
-                        alert.addButton(withTitle: "Download Now")
-                        alert.addButton(withTitle: "Later")
-                        if alert.runModal() == .alertFirstButtonReturn {
-                            if let updateURL = URL(string: squirrel.url) {
-                                NSWorkspace.shared.open(updateURL)
-                            }
-                        }
-                    } else {
-                        if manual {
-                            self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
-                        }
-                    }
-                    return
-                }
-
-                // 2. Try decoding standard API envelope response
-                if let resp = try? decoder.decode(UpdateResponse.self, from: data) {
-                    if let update = resp.data {
-                        self.updateAvailable = true
-                        self.updateNotes = update.notes ?? ""
-                        self.updateURL = update.url
-                        self.updateVersion = update.build_version
-                        if manual {
-                            self.updateCheckMessage = "New version \(update.build_version) is available!"
-                        }
-                        
-                        let alert = NSAlert()
-                        alert.messageText = "Update Available"
-                        alert.informativeText = "A new version of Artify (v\(update.build_version)) is available.\n\nRelease Notes:\n\(update.notes ?? "No release notes provided.")"
-                        alert.addButton(withTitle: "Download Now")
-                        alert.addButton(withTitle: "Later")
-                        if alert.runModal() == .alertFirstButtonReturn {
-                            if let updateURL = URL(string: update.url) {
-                                NSWorkspace.shared.open(updateURL)
-                            }
-                        }
-                    } else {
-                        if manual {
-                            self.updateCheckMessage = "You're up to date! (v\(Self.currentVersion))"
-                        }
-                    }
-                    return
-                }
-
-                if manual {
-                    self.updateCheckMessage = "Failed to parse update info"
                 }
             }
         }.resume()
+    }
+
+    func downloadAndInstallUpdate(downloadURLString: String, targetVersion: String) {
+        guard let downloadURL = URL(string: downloadURLString) else { return }
+        
+        updateCheckMessage = "Downloading v\(targetVersion)..."
+        isCheckingForUpdates = true
+        
+        let downloadTask = URLSession.shared.downloadTask(with: downloadURL) { [weak self] localURL, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.isCheckingForUpdates = false
+                    self.updateCheckMessage = "Download failed: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let localURL = localURL else {
+                    self.isCheckingForUpdates = false
+                    self.updateCheckMessage = "Download failed: No file received"
+                    return
+                }
+                
+                self.updateCheckMessage = "Installing v\(targetVersion)..."
+                
+                let currentAppPath = Bundle.main.bundlePath
+                guard currentAppPath.hasSuffix(".app") else {
+                    // Fallback to browser open if not running from a standard .app bundle
+                    self.isCheckingForUpdates = false
+                    NSWorkspace.shared.open(downloadURL)
+                    return
+                }
+                
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                    
+                    let zipDest = tempDir.appendingPathComponent("ArtistryUpdate.zip")
+                    try? FileManager.default.copyItem(at: localURL, to: zipDest)
+                    
+                    // Unzip package
+                    let unzipProc = Process()
+                    unzipProc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                    unzipProc.arguments = ["-o", zipDest.path, "-d", tempDir.path]
+                    try? unzipProc.run()
+                    unzipProc.waitUntilExit()
+                    
+                    let extractedApp = tempDir.appendingPathComponent("Artistry.app")
+                    guard FileManager.default.fileExists(atPath: extractedApp.path) else {
+                        DispatchQueue.main.async {
+                            self.isCheckingForUpdates = false
+                            self.updateCheckMessage = "Update failed: Invalid package format"
+                            NSWorkspace.shared.open(downloadURL)
+                        }
+                        return
+                    }
+                    
+                    // Background script to replace app & relaunch
+                    let script = """
+                    sleep 1
+                    rm -rf "\(currentAppPath)"
+                    mv "\(extractedApp.path)" "\(currentAppPath)"
+                    open "\(currentAppPath)"
+                    rm -rf "\(tempDir.path)"
+                    """
+                    
+                    let scriptProc = Process()
+                    scriptProc.executableURL = URL(fileURLWithPath: "/bin/bash")
+                    scriptProc.arguments = ["-c", script]
+                    try? scriptProc.run()
+                    
+                    DispatchQueue.main.async {
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
+            }
+        }
+        downloadTask.resume()
     }
 
     func promptForCustomShuffleInterval() {
