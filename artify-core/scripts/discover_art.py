@@ -173,23 +173,33 @@ def discover_and_seed(query):
         cur = conn.cursor()
         inserted = 0
         for p in paintings:
-            cur.execute("SELECT id FROM photos WHERE name = %s", (p['title'],))
-            if cur.fetchone(): continue
-            
-            # Author
+            # 1. Author resolution
             artist_name = p['artist'].split("(")[0].strip()
             cur.execute("SELECT id FROM authors WHERE name = %s", (artist_name,))
             row = cur.fetchone()
-            if row: author_id = row[0]
+            if row:
+                author_id = row[0]
             else:
                 author_id = str(uuid.uuid4())
                 cur.execute("INSERT INTO authors (id, created_at, updated_at, name, born, died, nationality, wikipedia, original_source) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                             (author_id, datetime.datetime.now(), datetime.datetime.now(), artist_name, p['artist_bio'], '', p['nationality'], '', p['source']))
             
-            # Photo
-            info = build_jeopardy_blurb(p['title'], p['artist'], p['artist_bio'], p['date'], p['medium'], p['location'], p['style'], "")
+            # 2. Check if this exact image URL is already in database
+            cur.execute("SELECT id FROM photos WHERE image_url = %s", (p['image_url'],))
+            if cur.fetchone():
+                continue
+            
+            # 3. Differentiate duplicate titles for the same artist (e.g. multiple "Smallsword" pieces)
+            photo_title = p['title']
+            cur.execute("SELECT COUNT(*) FROM photos WHERE name LIKE %s AND author_id = %s", (p['title'] + '%', author_id))
+            title_count = cur.fetchone()[0]
+            if title_count > 0:
+                photo_title = f"{p['title']} #{title_count + 1}"
+
+            # 4. Insert photo
+            info = build_jeopardy_blurb(photo_title, p['artist'], p['artist_bio'], p['date'], p['medium'], p['location'], p['style'], "")
             cur.execute("INSERT INTO photos (id, created_at, updated_at, name, image_url, author_id, width, height, info, date, style, location, dimensions, media, original_source, is_favorite) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (str(uuid.uuid4()), datetime.datetime.now(), datetime.datetime.now(), p['title'], p['image_url'], author_id, 1920, 1080, info, p['date'], p['style'], p['location'], p['dimensions'], p['medium'], p['source'], False))
+                        (str(uuid.uuid4()), datetime.datetime.now(), datetime.datetime.now(), photo_title, p['image_url'], author_id, 1920, 1080, info, p['date'], p['style'], p['location'], p['dimensions'], p['medium'], p['source'], False))
             inserted += 1
         conn.commit()
         print(f"Success: Inserted {inserted} new paintings.")

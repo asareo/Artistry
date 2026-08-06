@@ -1076,12 +1076,12 @@ class DraggableWindow: NSWindow {
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: style, backing: bufferingType, defer: flag)
         self.isMovableByWindowBackground = true // Native macOS dragging
-        self.level = .floating
+        self.level = .normal
         self.hidesOnDeactivate = false // CRITICAL: Keep interactable even when clicking desktop
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.collectionBehavior = [.stationary, .ignoresCycle]
         self.backgroundColor = .clear
         self.isOpaque = false
-        self.hasShadow = true
+        self.hasShadow = false
     }
 
     // Capture mouse down to ensure dragging works even over some SwiftUI elements
@@ -1190,27 +1190,27 @@ class GalleryWindowController {
     private var window: NSWindow?
 
     func show() {
-        // Always create a fresh window so gallery data is current
-        window?.close()
-        window = nil
+        if window == nil {
+            let w: CGFloat = 860, h: CGFloat = 640
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+                styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+                backing: .buffered, defer: false
+            )
+            win.center()
+            win.title = "Masterpiece Gallery"
+            win.titlebarAppearsTransparent = true
+            win.minSize = NSSize(width: 640, height: 480)
+            win.isReleasedWhenClosed = false
 
-        let w: CGFloat = 860, h: CGFloat = 640
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
-            backing: .buffered, defer: false
-        )
-        win.center()
-        win.title = "Masterpiece Gallery"
-        win.titlebarAppearsTransparent = true
-        win.minSize = NSSize(width: 640, height: 480)
+            let hosting = NSHostingView(rootView: GalleryView())
+            hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+            win.contentView = hosting
+            self.window = win
+        }
 
-        let hosting = NSHostingView(rootView: GalleryView())
-        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
-        win.contentView = hosting
-        self.window = win
-
-        win.makeKeyAndOrderFront(nil)
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 }
@@ -1530,9 +1530,9 @@ class OverlayWindowController {
 
         w.isOpaque = false
         w.backgroundColor = .clear
-        w.hasShadow = true
-        w.level = .floating
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.hasShadow = false
+        w.level = .normal
+        w.collectionBehavior = [.stationary, .ignoresCycle]
         w.ignoresMouseEvents = false  // DraggableWindow handles drag via sendEvent
 
         let overlayView = OverlayView()
@@ -1589,9 +1589,9 @@ struct OverlayView: View {
                     Button(action: { state.toggleFavorite(photo) }) {
                         Image(systemName: state.isFavorited(photo) ? "heart.fill" : "heart")
                             .font(.system(size: 20))
-                            .foregroundColor(state.isFavorited(photo) ? .red : .white.opacity(0.6))
-                            .padding(8)
-                            .background(Circle().fill(Color.white.opacity(0.1)))
+                            .foregroundColor(state.isFavorited(photo) ? .red : .white.opacity(0.85))
+                            .padding(6)
+                            .background(Circle().fill(Color.white.opacity(0.12)))
                     }
                     .buttonStyle(.plain)
                 }
@@ -1606,15 +1606,12 @@ struct OverlayView: View {
                     }
                 }
 
-                Divider()
-                    .background(Color.white.opacity(0.25))
-                    .padding(.vertical, 2)
-
-                // ── FIX 4: Art thought blurb instead of dimensions ────────────
-                // Show first 2 sentences of the info field as a contemplative
-                // thought piece. Falls back to a short artist bio if no info.
                 let blurb = thoughtBlurb(photo: photo)
                 if !blurb.isEmpty {
+                    Divider()
+                        .background(Color.white.opacity(0.25))
+                        .padding(.vertical, 2)
+
                     Text(blurb)
                         .font(.system(size: 11, weight: .light, design: .serif))
                         .foregroundColor(Color(white: 0.88))
@@ -1648,18 +1645,21 @@ struct OverlayView: View {
                     .foregroundColor(Color(white: 0.6))
             }
         }
-        .padding(18)
-        .frame(width: 400, alignment: .leading)
+        .padding(16)
+        .frame(width: 380, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.black.opacity(0.58))
+            Rectangle()
+                .fill(Color.black.opacity(0.72))
                 .background(
-                    RoundedRectangle(cornerRadius: 14)
+                    Rectangle()
                         .fill(.ultraThinMaterial)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
         )
-        .shadow(color: .black.opacity(0.5), radius: 24, x: 0, y: 6)
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
     }
 
     // ── Thought blurb: strip the "JEOPARDY KEY:" prefix and take ~2 sentences ──
