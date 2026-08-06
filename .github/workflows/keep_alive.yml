@@ -1,0 +1,42 @@
+name: Keep Supabase Active
+
+on:
+  schedule:
+    # Runs every 4 days at 00:00 UTC to ensure Supabase never auto-pauses
+    - cron: '0 0 */4 * *'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  ping-db:
+    name: Database Activity Ping
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install psycopg2-binary
+        run: pip install psycopg2-binary
+
+      - name: Execute SQL Heartbeat Ping
+        env:
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          python -c "
+          import os, psycopg2, sys
+          url = os.environ.get('SUPABASE_DATABASE_URL')
+          if not url:
+              print('Error: SUPABASE_DATABASE_URL secret is not configured.')
+              sys.exit(1)
+          try:
+              conn = psycopg2.connect(url, connect_timeout=10)
+              cur = conn.cursor()
+              cur.execute('SELECT 1;')
+              result = cur.fetchone()
+              conn.close()
+              print(f'Success: Supabase SQL Heartbeat Ping returned {result}. Project is active!')
+          except Exception as e:
+              print(f'Error connecting to Supabase: {e}')
+              sys.exit(1)
+          "
