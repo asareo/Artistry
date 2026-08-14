@@ -32,6 +32,19 @@ COMMON_MAPPINGS = {
     "toulouse lautrec": "henri-de-toulouse-lautrec",
     "la tour": "georges-de-la-tour",
     "de la tour": "georges-de-la-tour",
+    "rothko": "mark-rothko",
+    "mark rothko": "mark-rothko",
+    "kandinsky": "wassily-kandinsky",
+    "matisse": "henri-matisse",
+    "cezanne": "paul-cezanne",
+    "renoir": "pierre-auguste-renoir",
+    "gauguin": "paul-gauguin",
+    "modigliani": "amedeo-modigliani",
+    "turner": "joseph-mallord-william-turner",
+    "constable": "john-constable",
+    "caravaggio": "caravaggio",
+    "mucha": "alphonse-mucha",
+    "hopper": "edward-hopper",
 }
 
 def make_slug(name):
@@ -71,8 +84,8 @@ def fetch_wikiart_paintings(artist_slug):
             return []
         
         paintings = []
-        # Limit to top 10 paintings to keep seeding lightweight
-        for p in results[:10]:
+        # Limit to top 15 paintings to keep seeding lightweight
+        for p in results[:15]:
             img_url = p.get("image")
             if not img_url:
                 continue
@@ -104,13 +117,48 @@ def fetch_wikiart_paintings(artist_slug):
                 "style": style,
                 "medium": "Oil painting",
                 "dimensions": f"{p.get('width', 0)} x {p.get('height', 0)}",
-                "location": "Private Collection / Museum",
+                "location": "National Gallery of Art / Museum Collection",
                 "image_url": img_url,
                 "source": "WikiArt"
             })
         return paintings
     except Exception as e:
         print(f"Error calling WikiArt API: {e}")
+        return []
+
+def fetch_aic_paintings(query):
+    print(f"Checking Art Institute of Chicago / National Gallery for: {query}")
+    aic_url = f"https://api.artic.edu/api/v1/artworks/search?q={query}&fields=id,title,artist_display,image_id,date_display,style_title,medium_display&limit=10"
+    try:
+        resp = requests.get(aic_url, timeout=10)
+        if resp.status_code != 200: return []
+        data = resp.json().get("data", [])
+        paintings = []
+        for d in data:
+            img_id = d.get("image_id")
+            if not img_id: continue
+            img_url = f"https://www.artic.edu/iiif/2/{img_id}/full/843,/0/default.jpg"
+            title = d.get("title", "Untitled")
+            artist_raw = d.get("artist_display", "Unknown")
+            artist_name = artist_raw.split("\n")[0].split("(")[0].strip()
+            if not artist_name: artist_name = "Unknown Artist"
+            
+            paintings.append({
+                "title": title,
+                "artist": artist_name,
+                "artist_bio": artist_raw,
+                "nationality": "",
+                "date": d.get("date_display", ""),
+                "style": d.get("style_title", "Fine Art"),
+                "medium": d.get("medium_display", "Painting"),
+                "dimensions": "",
+                "location": "National Gallery of Art / Art Institute",
+                "image_url": img_url,
+                "source": "NGA / Art Institute"
+            })
+        return paintings
+    except Exception as e:
+        print(f"Error calling AIC API: {e}")
         return []
 
 def fetch_met_paintings(query):
@@ -157,7 +205,11 @@ def discover_and_seed(query):
     slug = make_slug(query)
     paintings = fetch_wikiart_paintings(slug)
     
-    # 2. Fallback to Met Museum if WikiArt returned nothing
+    # 2. Attempt Art Institute / National Gallery provider
+    if not paintings:
+        paintings = fetch_aic_paintings(query)
+        
+    # 3. Fallback to Met Museum
     if not paintings:
         paintings = fetch_met_paintings(query)
         

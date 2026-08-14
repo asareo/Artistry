@@ -116,7 +116,7 @@ func (r *Resource) SearchPhotos(query string, style string, nationality string) 
 	}
 
 	if query != "" {
-		q = q.Where("(photos.name ILIKE ? OR a.name ILIKE ?)", "%"+query+"%", "%"+query+"%")
+		q = q.Where("(photos.name ILIKE ? OR a.name ILIKE ? OR photos.style ILIKE ? OR photos.media ILIKE ? OR photos.info ILIKE ?)", "%"+query+"%", "%"+query+"%", "%"+query+"%", "%"+query+"%", "%"+query+"%")
 	}
 	if style != "" {
 		q = q.Where("photos.style ILIKE ?", "%"+style+"%")
