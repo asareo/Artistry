@@ -14,7 +14,7 @@ jobs:
       - name: Ping Artistry API (Queries Supabase & Wakes Render)
         run: |
           echo "Sending keepalive request to Artistry API..."
-          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" --max-time 30 "https://artistry-wsnw.onrender.com/api/feature/today")
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" --retry 3 --retry-delay 10 --retry-all-errors --max-time 180 "https://artistry-wsnw.onrender.com/api/feature/today")
           echo "HTTP Status: $HTTP_STATUS"
           if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 400 ]; then
             echo "Success! Artistry API responded and Supabase query executed."
